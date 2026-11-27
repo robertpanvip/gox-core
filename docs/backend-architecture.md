@@ -1,7 +1,7 @@
 # Backend 架构：统一契约与可独立拆分
 
 > **拆仓现状**：后端实现已迁至 [`gox-backend`](https://github.com/gox-projects/gox-backend)（`{rust,skia,web,gpu}`），
-> 核心语言库在本仓 `gox-core`，命令行工具与平台示例在 [`gox`](https://github.com/robertpanvip/gox)。
+> 核心语言库在本仓 `gox-core`，命令行工具与平台示例在 [`gox`](https://github.com/robertpanvip/gox-sample)。
 > 本文第 5 节的「未来拆分」表格为当时的规划稿，实际落地为上述三仓。
 >
 > 设计目标：GoX 定义统一的 Backend 契约，允许多个 Backend 实现并存；Go 与 Rust
