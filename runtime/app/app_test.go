@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	gxapp "github.com/robertpanvip/gox/runtime/app"
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxapp "github.com/robertpanvip/gox-core/runtime/app"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // lastFrameOf 取多次绘制拼接输出中的最后一帧（以 marker 的出现位置切分）。

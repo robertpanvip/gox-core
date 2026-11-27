@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robertpanvip/gox/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
 )
 
 // ---------- 规则 2：union-call-arg ----------

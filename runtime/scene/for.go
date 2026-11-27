@@ -40,6 +40,7 @@ type For struct {
 	indexKey bool
 	sink     *changeSink // 所属实例树的变更缓冲，传给各列表项子实例
 	bctx     *bindCtx    // 统一接线上下文，传给新建的列表项子树
+	scope    Owner       // 建树期捕获的 Owner；列表项重建时恢复它以继承 Context
 }
 
 type forEntry struct {
@@ -99,6 +100,7 @@ func NewFor(each func() []any, key func(any) any, render func(any) *Instance) *F
 		render:   render,
 		entries:  make(map[any]*forEntry),
 		indexKey: key == nil,
+		scope:    Reactive().CurrentOwner(),
 	}
 }
 
@@ -116,6 +118,7 @@ func NewForSignal(each func() []any, key func(any) any, render func(func() any) 
 		sigRender: render,
 		entries:   make(map[any]*forEntry),
 		indexKey:  key == nil,
+		scope:     Reactive().CurrentOwner(),
 	}
 }
 
@@ -214,6 +217,12 @@ func ForGetterOf[T any](each func() []T, key func(T) any, render func(T) *Instan
 
 // Resolve 在响应式 Effect 上下文中被调用：求值 each（登记依赖），做 keyed diff，
 // 返回嫁接用的根子树（把所有元素节点挂在 #frag 容器下）。
+// debugResolveCount 是 For.Resolve 的全局调用计数（E2E 诊断用）。
+var debugResolveCount int64
+
+// DebugForResolveCount 返回自进程启动以来 For.Resolve 的调用总次数。
+func DebugForResolveCount() int64 { return debugResolveCount }
+
 func (f *For) Resolve() *Instance {
 	if f == nil {
 		return nil
@@ -223,6 +232,7 @@ func (f *For) Resolve() *Instance {
 		f.mu.Unlock()
 		return nil
 	}
+	debugResolveCount++
 	items := f.each()
 	f.mu.Unlock()
 
@@ -360,10 +370,19 @@ func (f *For) buildEntry(entry *forEntry) {
 		entry.item = Reactive().NewSignal(entry.value)
 	}
 	entry.owner = Reactive().Root(func(o Owner) {
-		if f.sigRender != nil {
-			entry.inst = f.sigRender(func() any { return entry.item() })
+		build := func() {
+			if f.sigRender != nil {
+				entry.inst = f.sigRender(func() any { return entry.item() })
+			} else {
+				entry.inst = f.render(entry.value)
+			}
+		}
+		// 恢复建树期捕获的 Owner：列表项 render 里的组件函数 / Context.Use
+		// 借此沿正确 parent 链找到 Provider（含列表整体增删项后的重建）。
+		if f.scope != nil {
+			Reactive().RunWithOwner(f.scope, build)
 		} else {
-			entry.inst = f.render(entry.value)
+			build()
 		}
 		if entry.inst == nil {
 			return
@@ -442,7 +461,34 @@ func (f *For) adoptSinkDeep(s *changeSink) {
 }
 
 // adoptBind 实现 subtreeController：记录统一接线上下文，供 Resolve 构建新列表项时递归接线。
-func (f *For) adoptBind(ctx *bindCtx) { f.bctx = ctx }
+// 同时对首帧已建好的列表项补接：它们建树时还没有 ctx，用的是独立 effect（无 app
+// onDirty 帧边界），不补接会导致项内叶子变化时增量后端收不到重绘请求。
+func (f *For) adoptBind(ctx *bindCtx) {
+	f.bctx = ctx
+	// 统一 sink：首帧建树时 f.sink 指向 For 创建期实例的临时 sink，从未跟随
+	// 上层换到根实例的共享 sink。不修的话，后续 Resolve 产生的增删项结构变更
+	// （InsertBefore/RemoveChild）全部写进孤立 sink，增量后端永远收不到
+	// （playground 虚拟滚动实测缺陷根因）。与 Branch.adoptBind 对称。
+	if ctx.sink != nil && f.sink != ctx.sink {
+		f.adoptSinkDeep(ctx.sink)
+	}
+	f.mu.Lock()
+	entries := make([]*forEntry, 0, len(f.entries))
+	for _, e := range f.entries {
+		entries = append(entries, e)
+	}
+	f.mu.Unlock()
+	for _, e := range entries {
+		if e.inst != nil {
+			// 首帧建项时 sink 已 adopt，但项内后来挂载的嵌套组件可能漏接；
+			// 补接前再深灌一次 sink，确保项内所有叶子的 Change 汇入同一缓冲。
+			if f.sink != nil {
+				adoptSinkDeep(e.inst, f.sink)
+			}
+			e.inst.rebindWith(ctx)
+		}
+	}
+}
 
 // Dispose 销毁所有元素 Owner（幂等）。
 func (f *For) Dispose() {
@@ -459,11 +505,15 @@ func (f *For) Dispose() {
 	f.entries = nil
 	f.order = nil
 	f.mu.Unlock()
+	// 销毁期异常隔离：单个 entry 的 Owner cleanup panic 不阻断其余 entry 释放
+	// （entries 已摘除，中断即永久泄漏），全部释放后统一上报。
+	var caught []any
 	for _, e := range entries {
 		if e.owner != nil {
-			e.owner.Dispose()
+			caught = append(caught, runFuncSafely(e.owner.Dispose)...)
 		}
 	}
+	repanicDisposeErrors(caught)
 }
 
 // Len 当前元素数（调试/测试用）。

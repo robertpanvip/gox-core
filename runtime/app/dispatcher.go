@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 var errNoUIExecutor = errors.New("gxapp: UIExecutor 投递函数未提供")

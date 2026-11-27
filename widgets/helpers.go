@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // 这一组小工具把 gxscene.Op 的构造压缩成一行，控件模板因此能集中在 widgets.go

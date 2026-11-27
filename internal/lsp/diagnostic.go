@@ -3,10 +3,10 @@ package lsp
 import (
 	"context"
 
-	"github.com/robertpanvip/gox/internal/buildcheck"
-	"github.com/robertpanvip/gox/internal/check"
-	"github.com/robertpanvip/gox/pkg/compiler"
-	"github.com/robertpanvip/gox/pkg/sourcemap"
+	"github.com/robertpanvip/gox-core/internal/buildcheck"
+	"github.com/robertpanvip/gox-core/internal/check"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/sourcemap"
 )
 
 // toDiagnostics 把 go build 诊断（Go 坐标，1 基）经 sourcemap 映射回 gx 坐标（0 基 LSP）。

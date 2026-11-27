@@ -54,8 +54,12 @@ enum code { ok = 200, fail = 500 }
 	containsAll(t, got,
 		"type Color int", "ColorRed Color = iota", "ColorGreen Color = iota", "ColorBlue Color = iota",
 		"func (x Color) String() string", "func ParseColor(s string) (Color, bool)",
-		"type code int", "CodeOk code = 200", "CodeFail code = 500",
-		"func ParseCode(s string) (code, bool)")
+		// 私有 enum：类型/常量/Parse 全部私有（评审 P1：不允许部分公开 API）
+		"type code int", "codeOk code = 200", "codeFail code = 500",
+		"func parseCode(s string) (code, bool)")
+	if strings.Contains(got, "CodeOk") || strings.Contains(got, "ParseCode") {
+		t.Errorf("私有 enum 不应生成导出符号 CodeOk/ParseCode:\n%s", got)
+	}
 }
 
 func TestEnumStringAndFlags(t *testing.T) {
@@ -85,7 +89,7 @@ pub func view(name string) any {
 `
 	got := compileOK(t, "jsx.gx", src)
 	containsAll(t, got,
-		`import gxscene "github.com/robertpanvip/gox/runtime/scene"`,
+		`import gxscene "github.com/robertpanvip/gox-core/runtime/scene"`,
 		"gxscene.Render", "gxscene.OpElem", `Arg:"div"`,
 		"gxscene.OpAttr", `Key:"class"`, `Arg:"box"`,
 		"gxscene.OpDynAttr", `Key:"id"`,
@@ -171,7 +175,7 @@ pub func f() {
 `
 	got := compileOK(t, "coll.gx", src)
 	containsAll(t, got,
-		`import "github.com/robertpanvip/gox/runtime/list"`,
+		`import "github.com/robertpanvip/gox-core/runtime/list"`,
 		"list.List[int]",
 		"nums.MapFilter(strconv.Itoa,",
 		"nums.Filter(keep).Reduce(0,",
@@ -377,7 +381,8 @@ func main() { println(colorRed.String()) }
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []string{"case ColorRed:", "case ColorGreen:", "case ColorBlue:"} {
+	// 私有 enum color：常量名为小写 colorRed/...（评审 P1 可见性统一）
+	for _, c := range []string{"case colorRed:", "case colorGreen:", "case colorBlue:"} {
 		if !strings.Contains(res.GoSource, c) {
 			t.Errorf("无值成员 %s 不应被去重:\n%s", c, res.GoSource)
 		}
@@ -387,7 +392,7 @@ func main() { println(colorRed.String()) }
 func TestImportAliasReuse(t *testing.T) {
 	// 源码已用别名导入运行时，生成代码应复用该别名而非注入新的
 	src := `package main
-import mylist "github.com/robertpanvip/gox/runtime/list"
+import mylist "github.com/robertpanvip/gox-core/runtime/list"
 func main() {
 	xs := []int{1, 2, 3}
 	_ = xs.map(func(x int) int { return x })
@@ -422,7 +427,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.GoSource, "import list2 \"github.com/robertpanvip/gox/runtime/list\"") {
+	if !strings.Contains(res.GoSource, "import list2 \"github.com/robertpanvip/gox-core/runtime/list\"") {
 		t.Errorf("占位名冲突应分配 list2:\n%s", res.GoSource)
 	}
 	if !strings.Contains(res.GoSource, "list2.List[int]") {

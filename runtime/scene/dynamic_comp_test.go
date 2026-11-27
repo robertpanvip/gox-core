@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // Bug 03 回归：child 插槽产出 *Instance 后，Solid <Dynamic> 语义必须有出口。

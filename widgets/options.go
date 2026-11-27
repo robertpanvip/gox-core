@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // Option 是 Select / RadioGroup / Segmented / Tabs 等"选项型"组件的统一条目。

@@ -3,6 +3,7 @@ package gxscene
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // ---------------- 增量变更通道（additive：后端可选消费） ----------------
@@ -91,11 +92,256 @@ type ChildDiffer func(parent *Node, old, next []*Node, emit func(Change))
 type changeSink struct {
 	mu      sync.Mutex
 	enabled bool
+	id      int64 // E2E 诊断：sink 身份，用于发现孤立 sink
 	changes []Change
 	differ  ChildDiffer // nil 表示使用 host 内建 LIS diff
+
+	// caps 是 ref Element 句柄用的宿主能力（focus / measure），由 gxapp 注入，
+	// 经 sink 在整棵实例树共享。纯 scene / headless 下为零值，Element 安全降级。
+	caps hostCaps
+	// afterDraw 是异步布局读取的回填通道：Element.Measure 在同步读不到布局时
+	// 把 (NodeID, cb) 登记到这里，gxapp 在下一帧 Present/Draw 后统一回填。
+	// 由 gxapp 注入；未注入时 Element.Measure 直接以零值回调（不悬挂）。
+	afterDraw func(NodeID, func(w, h float32))
+	// onDirty 是命令式写回（如 CanvasContext 改了节点属性）后的重绘请求通道，
+	// 由 gxapp 注入为 app.requestDraw。纯 scene / headless 下为 nil，写回仍落到
+	// 节点与 Change 流，只是不主动请求帧（调用方可自行 Draw）。
+	onDirty func()
+	// RAF 队列挂在 sink 上（而非注入的宿主函数），以绕过时序：ref 回调在 build
+	// 期触发、早于任何能力注入，此时登记的 raf 也要能进队。
+	//   rafPending 尚未被本帧取走；rafLive 本帧已取走但尚未开始执行。
+	// cancelRAF 对两段都生效，故同批里取消一个还没轮到的回调仍然有效；一旦
+	// 回调开始执行就从 live 移除，之后的取消为 no-op（与浏览器语义一致）。
+	rafPending []*rafEntry
+	rafLive    []*rafEntry
 }
 
-func newChangeSink() *changeSink { return &changeSink{} }
+// RAFHandle 是 requestAnimationFrame 返回的取消句柄。0 为无效句柄。
+// 用全局单调计数而非 sink 内计数，使跨重渲染（新 sink）的陈旧句柄不会误伤新回调。
+type RAFHandle uint64
+
+var nextRAFHandle atomic.Uint64
+
+type rafEntry struct {
+	handle    RAFHandle
+	fn        func()
+	cancelled bool
+}
+
+// addRAF 登记一个下一帧回调，返回可用于 cancelRAF 的全局唯一句柄。
+func (s *changeSink) addRAF(fn func()) RAFHandle {
+	if s == nil || fn == nil {
+		return 0
+	}
+	h := RAFHandle(nextRAFHandle.Add(1)) // 从 1 开始，0 保留为无效句柄
+	s.mu.Lock()
+	s.rafPending = append(s.rafPending, &rafEntry{handle: h, fn: fn})
+	s.mu.Unlock()
+	return h
+}
+
+// cancelRAF 取消一个尚未开始执行的下一帧回调。对 pending 与本帧已取走的
+// live 两段都生效（同批里取消还没轮到的回调有效）；已开始执行或已取消的
+// 句柄为 no-op；未知句柄同样静默忽略。返回是否命中一个待执行回调。
+func (s *changeSink) cancelRAF(h RAFHandle) bool {
+	if s == nil || h == 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hit := false
+	cancel := func(entries []*rafEntry) {
+		for _, e := range entries {
+			if e.handle == h && !e.cancelled {
+				e.cancelled = true
+				hit = true
+				return
+			}
+		}
+	}
+	cancel(s.rafPending)
+	if !hit {
+		cancel(s.rafLive)
+	}
+	return hit
+}
+
+// takeRAF 把 pending 取走转入 live，返回本帧待执行条目（保持登记顺序）。
+// 转入 live 是为了让同批回调之间的取消仍然有效。
+func (s *changeSink) takeRAF() []*rafEntry {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	batch := s.rafPending
+	s.rafPending = nil
+	s.rafLive = append(s.rafLive, batch...)
+	s.mu.Unlock()
+	return batch
+}
+
+// runRAF 在进入某个回调前检查其是否被取消，并从 live 移除（开始执行后
+// 取消即 no-op）。返回 nil 表示该回调应跳过。
+func (s *changeSink) runRAF(e *rafEntry) func() {
+	if s == nil || e == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.cancelled {
+		return nil
+	}
+	e.cancelled = true // 标记已消费，之后的 cancelRAF 命中不到
+	// 从 live 摘除
+	for k, x := range s.rafLive {
+		if x == e {
+			s.rafLive = append(s.rafLive[:k], s.rafLive[k+1:]...)
+			break
+		}
+	}
+	return e.fn
+}
+
+// endRAF 帧末清空 live：本帧未执行的（被取消的）条目一并丢弃。
+func (s *changeSink) endRAF() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rafLive = nil
+	s.mu.Unlock()
+}
+
+// clearRAF 丢弃所有待执行/在途回调（Dispose 时用），杜绝销毁后残留回调执行。
+func (s *changeSink) clearRAF() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rafPending = nil
+	s.rafLive = nil
+	s.mu.Unlock()
+}
+
+// hasRAF 报告是否还有未执行的下一帧回调。gxapp 在 drain 后据此判断
+// 回调是否登记了下一帧（动画循环），从而决定是否预约再下一帧。
+func (s *changeSink) hasRAF() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	has := len(s.rafPending) > 0
+	s.mu.Unlock()
+	return has
+}
+
+// SetDirtyHook 注入命令式写回后的重绘请求回调（gxapp 用）。传 nil 清空。
+func (i *Instance) SetDirtyHook(fn func()) {
+	if i != nil {
+		i.changes.setDirtyHook(fn)
+	}
+}
+
+// RequestAnimationFrame 登记一个下一帧回调，返回取消句柄。回调在下一帧 Draw
+// 之前执行，典型用途是动画：回调里更新画布/信号，再登记下一帧形成循环。
+// 可在 ref 回调（build 期）直接调用——队列挂 sink 上，不依赖能力注入时序。
+// 用返回的句柄调用 CancelAnimationFrame 可取消尚未开始执行的回调。
+func (i *Instance) RequestAnimationFrame(fn func()) RAFHandle {
+	if i != nil {
+		return i.changes.addRAF(fn)
+	}
+	return 0
+}
+
+// CancelAnimationFrame 取消一个由本实例树登记的下一帧回调。已开始执行、
+// 已取消或未知句柄均为 no-op（与浏览器 cancelAnimationFrame 语义一致）。
+func (i *Instance) CancelAnimationFrame(h RAFHandle) {
+	if i != nil {
+		i.changes.cancelRAF(h)
+	}
+}
+
+// DrainRAF 取走并执行本帧的下一帧回调。run 包装单条回调的执行（app 用它做
+// panic 保护与 inRAF 置位）；已被取消的回调跳过，回调内部再登记的进入下一帧。
+func (i *Instance) DrainRAF(run func(fn func())) {
+	if i == nil || run == nil {
+		return
+	}
+	batch := i.changes.takeRAF()
+	if len(batch) == 0 {
+		return
+	}
+	for _, e := range batch {
+		if fn := i.changes.runRAF(e); fn != nil {
+			run(fn)
+		}
+	}
+	i.changes.endRAF()
+}
+
+// HasRAF 报告是否还有未执行的下一帧回调（动画循环是否登记了下一帧）。
+func (i *Instance) HasRAF() bool {
+	return i != nil && i.changes.hasRAF()
+}
+
+// ClearRAF 丢弃所有待执行/在途回调（Dispose 用）。
+func (i *Instance) ClearRAF() {
+	if i != nil {
+		i.changes.clearRAF()
+	}
+}
+
+func (s *changeSink) setDirtyHook(fn func()) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onDirty = fn
+	s.mu.Unlock()
+}
+
+// dirty 在命令式写回后调用：通知宿主请求重绘。回调在锁外执行，避免重入。
+func (s *changeSink) dirty() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	fn := s.onDirty
+	s.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// SetMeasureHook 注入异步布局回填通道（gxapp 用）。传 nil 清空。
+// 它是 Instance 的导出转发，供装配层在 Render 后接上帧后回填。
+func (i *Instance) SetMeasureHook(fn func(NodeID, func(w, h float32))) {
+	if i != nil {
+		i.changes.setMeasureHook(fn)
+	}
+}
+
+func (s *changeSink) setMeasureHook(fn func(NodeID, func(w, h float32))) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.afterDraw = fn
+	s.mu.Unlock()
+}
+
+// measureHook 返回当前回填通道。
+func (s *changeSink) measureHook() func(NodeID, func(w, h float32)) {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	fn := s.afterDraw
+	s.mu.Unlock()
+	return fn
+}
+
+func newChangeSink() *changeSink { return &changeSink{id: dbgNextSinkID.Add(1)} }
 
 // setDiffer 注入/清除子节点 diff 策略（nil 恢复内建）。作用于整棵共享 sink。
 func (s *changeSink) setDiffer(d ChildDiffer) {
@@ -118,12 +364,55 @@ func (s *changeSink) enable() {
 }
 
 func (s *changeSink) add(c Change) {
-	if s == nil || !s.enabled {
+	if s == nil {
+		return
+	}
+	if c.Kind == ChangeSetAttr || c.Kind == ChangeSetText || c.Kind == ChangeSetHandler {
+		if s.enabled {
+			dbgLeafAdds.Add(1)
+		}
+	} else {
+		// 结构类变更（InsertBefore/RemoveChild/MoveChild/ReplaceChildren）：
+		// E2E 诊断——不管 sink 是否 enable 都计数，用于发现「变更写进孤立 sink」。
+		dbgStructAdds.Add(1)
+		if s.enabled {
+			dbgStructAddsEnabled.Add(1)
+		} else {
+			dbgOrphanSinkID.Store(s.id)
+			dbgOrphanLastKind.Store(int64(c.Kind))
+		}
+	}
+	if !s.enabled {
 		return
 	}
 	s.mu.Lock()
 	s.changes = append(s.changes, c)
 	s.mu.Unlock()
+}
+
+// E2E 诊断计数：全进程 sink.add 的叶子/结构变更量，以及结构变更中落入
+// enabled sink 的数量。structural > structuralEnabled 说明存在孤立 sink。
+var (
+	dbgLeafAdds          atomic.Int64
+	dbgStructAdds        atomic.Int64
+	dbgStructAddsEnabled atomic.Int64
+	dbgOrphanSinkID      atomic.Int64
+	dbgOrphanLastKind    atomic.Int64
+	dbgNextSinkID        atomic.Int64
+)
+
+// DebugSinkStats 返回 sink.add 的全局统计（E2E 诊断用）。
+func DebugSinkStats() (leaf, structural, structuralEnabled, orphanSinkID, orphanKind int64) {
+	return dbgLeafAdds.Load(), dbgStructAdds.Load(), dbgStructAddsEnabled.Load(),
+		dbgOrphanSinkID.Load(), dbgOrphanLastKind.Load()
+}
+
+// DebugRootSinkID 返回实例根 sink 的 id（与 orphanSinkID 对比判断是否孤立）。
+func (i *Instance) DebugRootSinkID() int64 {
+	if i == nil || i.changes == nil {
+		return -1
+	}
+	return i.changes.id
 }
 
 // take 取走并清空当前所有变更，保持顺序。

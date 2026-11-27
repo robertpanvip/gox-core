@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // fireClick 找到 kind 节点上的 onClick handler 并派发一个最小合成事件。

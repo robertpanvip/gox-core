@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	gxapp "github.com/robertpanvip/gox/runtime/app"
+	gxapp "github.com/robertpanvip/gox-core/runtime/app"
 )
 
 // 注册表是全局状态：测试用唯一名字避免相互干扰，不清理也不影响其他用例。

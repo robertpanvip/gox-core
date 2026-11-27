@@ -608,7 +608,7 @@ func main() {
 // 同时守护其它 comma-ok 形态不受影响。
 func TestBindCommaOKIndexElemType(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { sig a string }
 func main() {
 	m := map[string]P{"k": {a: "x"}}

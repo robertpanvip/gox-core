@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 func menuContent() *gxscene.Instance {

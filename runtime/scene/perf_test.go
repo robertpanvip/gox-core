@@ -3,8 +3,8 @@ package gxscene_test
 import (
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // T4.5：Perf() 暴露 getter 求值次数、写入数、接线插槽数，可观测插槽级更新的精确性。

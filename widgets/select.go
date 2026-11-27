@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // Select 下拉选择器——基于 Popover 浮层底座实现，是 Select/Dropdown/Menu 的
@@ -78,19 +78,20 @@ func selectTrigger(value func() string, options []Option, placeholder, width, to
 	const (
 		textSlot = iota
 		colorSlot
+		chevronSlot
 		nSlots
 	)
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "select-trigger"),
 		attr("width", width), attr("bg", ThemeInputBg),
-		attr("border", ThemeBorder), attr("border-width", "1"),
-		attr("border-radius", "8"), attr("padding", "10"),
+		attr("border", ThemeBorder), attr("border-width", HairlineWidth),
+		attr("border-radius", RadiusControl), attr("padding", "6"), attr("height", ControlHeight),
 		attr("flex-direction", "row"), attr("align-items", "center"),
 		attr("justify-content", "space-between"), attr("gap", "8"), attr("opacity", "1"),
 		dynAttr("color", colorSlot),
-		el("span"), attr("font-size", "14"), dynChild(textSlot), closeEl(),
-		el("span"), attr("font-size", "12"), attr("color", ThemeMuted),
-		gxscene.Op{Code: gxscene.OpChildText, Arg: "▾"}, closeEl(),
+		el("span"), attr("font-size", FontBody), dynChild(textSlot), closeEl(),
+		// 下拉箭头用预制矢量图标（chevron-down），替代 "▾" 字形。
+		gxscene.Op{Code: gxscene.OpComp, Arg: "SelectChevron", Slot: chevronSlot},
 		closeEl(),
 	}
 	if disabled {
@@ -118,6 +119,7 @@ func selectTrigger(value func() string, options []Option, placeholder, width, to
 			}
 			return ThemeText
 		},
+		func() any { return iconNode("chevron-down", 14, "muted") },
 	)
 }
 
@@ -161,14 +163,14 @@ func selectOptionItem(o Option, value func() string, onChange func() gxscene.Han
 		el("div"), attr("gx-role", "select-option"),
 		attr("flex-direction", "row"), attr("align-items", "center"),
 		attr("justify-content", "space-between"), attr("gap", "8"),
-		attr("padding", "8"), attr("border-radius", "6"),
+		attr("padding", "6"), attr("border-radius", RadiusSmall),
 		attr("transition", "bg 140ms ease"),
 		event("onClick", clickSlot),
 		dynAttr("bg", bgSlot), dynAttr("color", colorSlot),
-		el("span"), attr("font-size", "14"),
+		el("span"), attr("font-size", FontBody),
 		gxscene.Op{Code: gxscene.OpChildText, Arg: optionLabel(o)}, closeEl(),
-		el("span"), attr("font-size", "13"), attr("weight", "bold"),
-		dynChild(checkSlot), closeEl(),
+		// 选中勾用预制矢量图标（check），替代 "✓" 字形。
+		gxscene.Op{Code: gxscene.OpComp, Arg: "SelectCheck", Slot: checkSlot},
 		closeEl(),
 	}
 	disabled := o.Disabled
@@ -183,10 +185,10 @@ func selectOptionItem(o Option, value func() string, onChange func() gxscene.Han
 			})
 		},
 		func() any {
-			if selected() {
-				return ThemePanel
-			}
-			return ThemePanel
+		if selected() {
+			return ThemeFill
+		}
+		return ThemePanel
 		},
 		func() any {
 			if selected() {
@@ -196,9 +198,9 @@ func selectOptionItem(o Option, value func() string, onChange func() gxscene.Han
 		},
 		func() any {
 			if selected() {
-				return "✓"
+				return iconNode("check", 15, "primary")
 			}
-			return ""
+			return nil
 		},
 	)
 }

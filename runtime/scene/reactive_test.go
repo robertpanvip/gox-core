@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // 这一组测试模拟编译器为 signal 语法 + JSX scene 后端生成的产物，验证：

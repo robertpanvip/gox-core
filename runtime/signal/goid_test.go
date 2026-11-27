@@ -3,7 +3,7 @@ package signal_test
 import (
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // TX.1：goid 实现可替换，替换后依赖追踪按新 id 隔离，核心逻辑不变。

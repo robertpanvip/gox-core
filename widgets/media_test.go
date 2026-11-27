@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/canvas"
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/canvas"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 func TestImgStructure(t *testing.T) {
@@ -22,6 +22,37 @@ func TestImgStructure(t *testing.T) {
 	}
 	if n.Props["object-fit"] != "cover" || n.Props["border-radius"] != "8" {
 		t.Errorf("样式属性未透传: %v", n.Props)
+	}
+}
+
+func TestVideoStructure(t *testing.T) {
+	inst := Video(gxscene.Props{
+		"src": "sample.mp4", "poster": "cover.png", "width": "640", "height": "360",
+		"object-fit": "contain", "autoplay": true, "loop": true, "muted": true,
+		"playback-id": 2, "playing": true, "seek-to": 3.5,
+	})
+	root := inst.Root()
+	n := findKind(root, "video")
+	if n == nil {
+		t.Fatal("应产出 Kind=video 节点")
+	}
+	for k, want := range map[string]string{
+		"src": "sample.mp4", "poster": "cover.png", "object-fit": "contain",
+		"width": "640", "height": "360", "playback-id": "2", "seek-to": "3.5",
+		"autoplay": "true", "loop": "true", "muted": "true", "playing": "true",
+	} {
+		if got := n.Props[k]; got != want {
+			t.Errorf("prop %s = %v, want %v", k, got, want)
+		}
+	}
+}
+
+func TestVideoPlayingGetter(t *testing.T) {
+	playing := false
+	inst := Video(gxscene.Props{"src": "x.mp4", "playing": func() bool { return playing }})
+	n := findKind(inst.Root(), "video")
+	if n.Props["playing"] != "false" {
+		t.Errorf("playing getter=false 应写 \"false\", got %v", n.Props["playing"])
 	}
 }
 

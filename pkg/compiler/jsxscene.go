@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -34,6 +35,10 @@ import (
 type jsxSceneCtx struct {
 	sigs  map[string]bool
 	comps map[string]string
+	// explicitSigCallErr: JSX 片段（插值 / 属性槽 / 事件体）里用户显式调用 sig
+	// 变量（{count()}）或 sig 字段（{s.x()}）时记录，编译结束后由
+	// transformJSXScene 返回给上层报错。
+	explicitSigCallErr error
 	// sigTypes: sig 变量声明类型（改写前收集，如 users→[]User），
 	// 供 <For> 在 render 参数无类型注解时从 each 推断元素类型。
 	sigTypes map[string]string
@@ -391,12 +396,92 @@ func isEventAttrName(name string) bool {
 	return c >= 'A' && c <= 'Z'
 }
 
-// eventGetter 为事件属性生成取值 getter。attrExpr 走正常表达式词法化；
-// 静态字符串/bool 事件包成常量 getter（后端按需解释，前端不假设签名）。
+// normalizeEventHandlerExpr 只做一件事：把事件属性上的箭头语法 `=>`
+// 展开成 Go 的 func 字面量（JSX 属性路径不跑 transformLambdas，=> 会残留）。
+// 其余形态——具名函数 inc、func 字面量 func(ctx EventContext){...}、完整签名、
+// 以及显式的 gxscene.Handler(...)——全部原样透传，编译器不套任何包装。
+//
+// 于是 `onClick={inc}` 编译后传入的就是 inc 函数本身；运行时 dispatchLocal 按
+// 实际签名分派（func() 无参调用，func(EventContext) 带 ctx 调用），无需包装类。
+//
+//	onClick={inc}                                     → inc
+//	onClick={() => inc()}                             → func() { inc() }
+//	onClick={() => n = n + 1}                         → func() { n(n()+1) }   （原 B6）
+//	onClick={(e) => n = e.X}                          → func(e gxscene.EventContext) { n(e.X) }
+//	onClick={func(ctx gxscene.EventContext) { inc() }} → 原样
+//	onClick={gxscene.Handler(func(ctx ...) {...})}    → 原样（幂等兼容）
+//
+// 返回的是一段 GX 表达式源码，随后照常走 lexExprScene 做 sig 读写改写。
+func normalizeEventHandlerExpr(expr string) string {
+	s := strings.TrimSpace(expr)
+	if s == "" {
+		return expr
+	}
+	// 只有箭头语法需要展开；其余（含 gxscene.Handler(...)）原样透传。
+	if arrow := topLevelArrow(s); arrow >= 0 {
+		params := strings.TrimSpace(s[:arrow])
+		body := strings.TrimSpace(s[arrow+2:])
+		return arrowToFuncLit(params, body)
+	}
+	return expr
+}
+
+// topLevelArrow 找顶层 `=>` 的下标（跳过括号/花括号/方括号内部），没有返回 -1。
+func topLevelArrow(s string) int {
+	depth := 0
+	for i := 0; i+1 < len(s); i++ {
+		switch s[i] {
+		case '(', '{', '[':
+			depth++
+		case ')', '}', ']':
+			depth--
+		case '=':
+			if s[i+1] == '>' && depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// arrowToFuncLit 把箭头 `PARAMS => BODY` 展开成 Go func 字面量。
+// 参数规则：()→无参；单名字 e→补 gxscene.EventContext 类型；已带类型则原样。
+// body 里的 sig 读写由后续 lexExprScene 改写。
+func arrowToFuncLit(params, body string) string {
+	p := strings.TrimSpace(params)
+	p = strings.TrimPrefix(p, "(")
+	p = strings.TrimSuffix(p, ")")
+	p = strings.TrimSpace(p)
+	if p != "" && !strings.ContainsAny(p, " \t") && isGoIdent(p) {
+		// `(e)` → `e gxscene.EventContext`
+		p = p + " gxscene.EventContext"
+	}
+	if body == "" {
+		body = " _ = nil "
+	}
+	return "func(" + p + ") { " + body + " }"
+}
+
+// isGoIdent 判断 s 是否是 Go 标识符（用作箭头参数名）。
+func isGoIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// eventGetter 为事件属性生成取值 getter。attrExpr 先规范化成推荐签名
+// 的 Handler 表达式，再走正常表达式词法化；静态字符串/bool 事件包成常量 getter。
 func eventGetter(a jsxAttr) sceneGetter {
 	switch a.kind {
 	case attrExpr:
-		return sceneGetter{expr: a.value, pos: a.pos}
+		return sceneGetter{expr: normalizeEventHandlerExpr(a.value), pos: a.pos}
 	case attrString:
 		return sceneGetter{pos: a.pos, call: []Token{tokString(normalizeStringLit(a.value), a.pos)}}
 	default: // attrBool
@@ -417,12 +502,31 @@ func walkScene(n *jsxNode, ops *[]sceneOp, getters *[]sceneGetter, slotCounter *
 		if msg, _ := suspiciousAttr(a.name); msg != "" {
 			ctx.report("attr-unknown", a.pos, msg)
 		}
-		// A2/A3：class/style 传对象字面量（class={{ active: true }}）不是 GX/后端
-		// 支持的写法——对象会被降级成匿名 struct 塞进属性值，静默错值（后端拿到
-		// 无意义的 struct）。给出带坐标的诊断，提示改用条件表达式或静态拼接。
-		if (a.name == "class" || a.name == "style") && a.kind == attrExpr && isObjectLitText(a.value) {
-			ctx.reportAttrUnsupported(a.pos, a.name,
-				a.name+" 不支持对象字面量；请用条件表达式（cond ? \"a\" : \"b\"）或静态字符串拼接")
+		// A2/A3：style 传对象字面量 → 强类型 gxscene.Style 结构体字面量。
+		// 普通 key 用驼峰（fontSize / backgroundColor），伪状态用单词 key
+		// （hover / active / focus / disabled，不含 "&:" 符号）。整块作为一个
+		// 动态属性插槽，runtime writeAttr 按字段展平后细粒度 diff。
+		// class 无样式表语义，保持原诊断不变。
+		if a.kind == attrExpr && isObjectLitText(a.value) {
+			if a.name == "style" {
+				if styleToks, ok := styleObjToTokens(a.value, a.pos, ctx); ok {
+					s := *slotCounter
+					*slotCounter++
+					*ops = append(*ops, sceneOp{code: "OpDynAttr", key: "style", slot: s})
+					*getters = append(*getters, sceneGetter{pos: a.pos, call: styleToks})
+					continue
+				}
+				// 兼容既有 JSON 形态（key 带引号）：静态 parseStyle → Style。
+				if json.Valid([]byte(a.value)) {
+					a.value = "gxscene.parseStyle(" + strconv.Quote(a.value) + ")"
+				} else {
+					ctx.reportAttrUnsupported(a.pos, a.name,
+						"style 对象字面量无法识别：key 请用驼峰（如 { fontSize: 12 }）或伪状态单词（如 { hover: { bg: \"#eee\" } }）")
+				}
+			} else if a.name == "class" {
+				ctx.reportAttrUnsupported(a.pos, a.name,
+					"class 不支持对象字面量；请用字符串类名或条件表达式")
+			}
 		}
 		// B10：双引号字符串里的 ${...} 不会被 GX 模板串展开（模板串用反引号），
 		// 会原样进属性值且变量未被引用（declared and not used）。给明确诊断。
@@ -434,16 +538,23 @@ func walkScene(n *jsxNode, ops *[]sceneOp, getters *[]sceneGetter, slotCounter *
 		// 后端自定义事件（如 onFoo）同样原样进 Node.Handlers。静态字符串/bool 的
 		// on* 也放行（编译为常量 getter，后端按需解释）。
 		if isEventAttrName(a.name) {
-			// B6：事件属性的箭头函数 body 是赋值语句时（() => n = n+1），
-			// JSX 属性路径不展开箭头，=> 残留产非法 Go。给明确诊断 + 修法。
-			if a.kind == attrExpr && isArrowAssignExpr(a.value) {
-				ctx.report("event-arrow-statement", a.pos,
-					"事件 handler 的箭头函数体是赋值语句，请用 func() { ... } 字面量（如 onClick={func() { n = n + 1 }}）")
-			}
+			// 事件表达式统一经 eventGetter 规范化成推荐签名 Handler，
+			// 具名函数 / func 字面量 / 箭头（含赋值 body）都能编译并触发。
 			s := *slotCounter
 			*slotCounter++
 			*ops = append(*ops, sceneOp{code: "OpEvent", key: a.name, slot: s})
 			*getters = append(*getters, eventGetter(a))
+			continue
+		}
+		// ref 模板引用（命令式逃生口）：ref={fn} 编成 OpRef + getter，fn 是
+		// func(*gxscene.Element)（或 func(any) 兼容形态）。建树时该节点 ID 已分配，
+		// 运行时回调一次 *Element 句柄，销毁时回调 nil。只认原生元素上的 attrExpr；
+		// 字符串/bool 的 ref 无意义，按普通静态属性透传（后端自行解释）。
+		if a.name == "ref" && a.kind == attrExpr {
+			s := *slotCounter
+			*slotCounter++
+			*ops = append(*ops, sceneOp{code: "OpRef", slot: s})
+			*getters = append(*getters, sceneGetter{expr: a.value, pos: a.pos})
 			continue
 		}
 		switch a.kind {
@@ -759,13 +870,13 @@ func forTokens(n *jsxNode, ctx *jsxSceneCtx) []Token {
 		// key body 是以 kName 为自由变量的表达式，需补 sig 读 ()。
 		bodyToks := New(kBody).AllTokens()
 		if len(ctx.sigs) > 0 {
-			bodyToks = rewriteJSXInterpSignals(bodyToks, ctx.sigs)
+			bodyToks = rewriteJSXInterpSignals(bodyToks, ctx.sigs, &ctx.explicitSigCallErr, "")
 		}
 		// Bug 01（处 2）：key lambda 读 item 的 sig 字段（如 key={(u)=>u.name}）
 		// 也要补 ()，否则 key 取到函数地址、去重永远不相等。注入 kName 的静态
 		// 类型并走 sig 字段 selector 改写（与 render body 同源）。
 		restoreKeyType := ctx.bindings.WithTypeOverride(kName, kType)
-		bodyToks = rewriteJSXSignalFieldSelectors(bodyToks, ctx.bindings, ctx.signalFields, ctx.jsxPos)
+		bodyToks = rewriteJSXSignalFieldSelectors(bodyToks, ctx.bindings, ctx.signalFields, ctx.jsxPos, &ctx.explicitSigCallErr)
 		restoreKeyType()
 		for _, t := range bodyToks {
 			if t.Kind == EOF {
@@ -1255,37 +1366,6 @@ func isGoControlInJSX(s string) bool {
 	return false
 }
 
-// isArrowAssignExpr 判断事件属性值是否是"箭头函数 + 赋值 body"形态（B6）：
-// `() => n = n + 1` / `(e) => n = e`。这类 lambda 在 JSX 属性路径不会被
-// transformLambdas 展开，=> 会残留进 Go 源码导致语法错误。
-func isArrowAssignExpr(s string) bool {
-	arrow := strings.Index(s, "=>")
-	if arrow < 0 {
-		return false
-	}
-	body := strings.TrimSpace(s[arrow+2:])
-	// body 以标识符/选择器开头且含单个 '='（赋值，非 ==/!=/<=/>=）。
-	if body == "" {
-		return false
-	}
-	for i := 0; i < len(body); i++ {
-		if body[i] == '=' {
-			prev := byte(0)
-			next := byte(0)
-			if i > 0 {
-				prev = body[i-1]
-			}
-			if i+1 < len(body) {
-				next = body[i+1]
-			}
-			if prev != '=' && prev != '!' && prev != '<' && prev != '>' && next != '=' {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // indexedRoot 判断 each 表达式是否是「根标识符本身被索引」的形态（第十二轮 P1-A）。
 // 判据：表达式里第一个 '[' 必须早于第一个 '('——
 //
@@ -1348,13 +1428,15 @@ func lexExprScene(expr string, base Pos, ctx *jsxSceneCtx) []Token {
 	// item 参数（信号化模式）是 func() T，读它必须写成 u() 才能让子树 getter
 	// 登记对 item sig 的依赖——这是 For item sig 根治方案在编译器的落点。
 	needRewrite := len(ctx.sigs) > 0 || ctx.forItemParam != ""
+	// effective：该 JSX 位置真正指向 sig 变量的名字集合（含 For item getter 参数）。
+	// 既驱动 sig 读补 ()，也供嵌套深写诊断复用（片段 token 是假坐标，不能按位置
+	// 查绑定，只能用这个已解析的名字集合判定链根）。
+	effective := map[string]bool{}
 	if needRewrite {
 		// 按 JSX 根位置解析绑定：被局部变量遮蔽的同名 sig 不应改写（{count}
 		// 在 count := 3 作用域内读的是局部变量）。sigs 是全局名字集合，需先按
 		// bindings+jsxPos 过滤出该位置真正指向 sig 的名字，再交回形态改写逻辑。
-		effective := ctx.sigs
 		if ctx.bindings != nil {
-			effective = make(map[string]bool, len(ctx.sigs))
 			for name := range ctx.sigs {
 				if isSignalRefAt(ctx.bindings, name, ctx.jsxPos) {
 					effective[name] = true
@@ -1362,23 +1444,28 @@ func lexExprScene(expr string, base Pos, ctx *jsxSceneCtx) []Token {
 			}
 		} else if len(ctx.sigs) > 0 && ctx.forItemParam != "" {
 			// 无绑定表但需补 item 参数：复制一份再改，避免污染全局 sigs map。
-			cp := make(map[string]bool, len(ctx.sigs)+1)
 			for name := range ctx.sigs {
-				cp[name] = true
+				effective[name] = true
 			}
-			effective = cp
 		}
 		if ctx.forItemParam != "" {
-			if effective == nil {
-				effective = map[string]bool{}
-			}
 			effective[ctx.forItemParam] = true
 		}
-		toks = rewriteJSXInterpSignals(toks, effective)
+		if len(effective) > 0 {
+			toks = rewriteJSXInterpSignals(toks, effective, &ctx.explicitSigCallErr, ctx.forItemParam)
+		}
 	}
-	// sig 字段 selector 读补 ()（如组件内 {p.name} → p.name()）。
+	// sig 字段 selector 读写改写（读补 ()、写转调用式、显式调用报错）。
 	// 与 rewriteJSXInterpSignals 独立：后者只认全局 sig 名，不管 sig 字段。
-	toks = rewriteJSXSignalFieldSelectors(toks, ctx.bindings, ctx.signalFields, ctx.jsxPos)
+	toks = rewriteJSXSignalFieldSelectors(toks, ctx.bindings, ctx.signalFields, ctx.jsxPos, &ctx.explicitSigCallErr)
+	// 嵌套深写诊断（对齐主 token 流的 checkSignalValueDeepWrite）：此刻 sig 读
+	// 已是 name() 形态、扫描约定一致。此前 `p.inner.n = 5` 在事件体里生成
+	// `p().Inner.N = 5`（语法合法、类型非法、无任何提示）——补齐覆盖。
+	if len(effective) > 0 && ctx.diags != nil {
+		checkSignalValueDeepWriteFunc(toks, func(name string, _ Pos) bool {
+			return effective[name]
+		}, ctx.jsxPos, ctx.diags)
+	}
 	// 对象字面量自动推断：{ { name: "x", age: 1 } } → struct{ name string; age int }{...}。
 	// 插值片段无期望类型上下文，走匿名 struct 推断路径。
 	if converted, err := transformObjectLitExpr(toks); err == nil {

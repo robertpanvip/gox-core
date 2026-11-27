@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // Issue #1 回归：动态 children 插槽（OpDynChild）承载有状态组件子树时，

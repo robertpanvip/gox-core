@@ -24,7 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // OpCode 是编译期生成的 opcode 类型。
@@ -46,6 +46,11 @@ const (
 	// 该插槽每次求值 getter，按返回实例的场景模板身份比较——身份变化则替换子树、
 	// 身份不变则复用旧子树只做细粒度更新。是"确实想按条件切换组件"的显式出口。
 	OpDynComp
+	// OpRef 模板引用插槽（命令式逃生口）：Slot=索引；getter 返回一个回调
+	// func(*Element)（或其 func(any) 兼容形态）。建树时该节点 ID 分配完毕后回调
+	// 一次 *Element 句柄，Dispose 时回调 nil 表示卸载。ref 是一次性挂载/卸载语义，
+	// 不进响应式重新绑定——signal 变化不会重跑 ref。
+	OpRef
 )
 
 // Op 是一条 opcode 指令。Arg/Key/Slot 的含义由 Code 决定。
@@ -114,9 +119,10 @@ type EventContext struct {
 	Synthetic *SyntheticEvent
 }
 
-// Handler 是协议推荐的事件处理器签名。注意 Node.Handlers 存的是 any（handler 原值），
-// 后端可自行断言为 Handler 或自己约定的任意签名——前端不强制签名，不阻拦自定义事件。
-type Handler func(ctx EventContext)
+// Handler 是协议推荐的事件处理器签名（func(EventContext) 的类型别名）。
+// Node.Handlers 存的是 any（handler 原值），可以是裸函数 func()/func(EventContext)，
+// 后端派发时按签名分派；其它自定义签名原值仍可经 n.Handler(name) 取得。
+type Handler = func(ctx EventContext)
 
 // NodeID 是节点的稳定身份，一个 App/Instance 生命周期内唯一且不复用。
 //
@@ -190,10 +196,12 @@ type slotKind uint8
 const (
 	slotChild slotKind = iota
 	slotAttr
+	slotNoop    // 未被模板引用的补全插槽：写入一律忽略（防御路径若指向根会毁树）
 	slotComp    // 复合组件：getter 返回一个 *Instance，挂载为子树，Update 递归驱动
 	slotBranch  // 动态子树：getter 返回 subtreeController（*Branch 条件分支 / *For keyed 列表）
 	slotEvent   // 事件绑定：getter 返回 handler 原值，写入节点的 Handlers（不进 Props）
 	slotDynamic // 动态组件（OpDynComp / <Dynamic>）：getter 返回 *Instance，按模板身份切换子树
+	slotRef     // 模板引用：getter 返回 func(*Element) 回调，建树/销毁各触发一次，不进响应式重绑
 )
 
 // subtreeController 是动态子树控制器的公共契约：Branch（条件分支）与 For（keyed 列表）
@@ -220,6 +228,13 @@ type slot struct {
 	child *Instance         // slotComp 时挂载的子组件实例
 	ctrl  subtreeController // slotBranch/OpFor 时挂载的动态子树控制器
 	owner *Instance         // 所属实例，供挂载子实例时共享变更 sink
+
+	refElem *Element // slotRef 建树时创建的句柄，Dispose 时标记销毁并回调 nil
+	refCb   any      // slotRef 的回调原值 func(*Element)，Dispose 时回填 nil
+
+	// styleKeys 是上次把 Style 值展平到 node.Props 时写入的 key 集合。
+	// style 内容变化时用它清理已消失的 key（写空串使后端旧样式失效）。
+	styleKeys []string
 }
 
 // PerfStats 是场景树的可观测性能指标（T4.5）。所有计数在响应式 effect 内累加，
@@ -274,6 +289,53 @@ func (s *slot) stableChildComp() *Instance {
 		return s.child
 	}
 	return nil
+}
+
+// DebugDumpStructural 递归 dump 整棵实例树的结构插槽接线状态（E2E 诊断用）。
+// 每行格式：<kind> slot=N wired=bool ctrl=bool get=bool evals=N child=bool。
+// 用于定位「结构插槽 effect 未建立/被销毁」类缺陷。
+func (i *Instance) DebugDumpStructural(depth int) string {
+	if i == nil {
+		return ""
+	}
+	var b strings.Builder
+	for s, sl := range i.slots {
+		if sl.kind != slotBranch && sl.kind != slotDynamic && sl.kind != slotNoop {
+			continue
+		}
+		fmt.Fprintf(&b, "%sbranch slot=%d wired=%v ctrl=%v get=%v evals=%d child=%v tpl=%s\n",
+			strings.Repeat("  ", depth), s, sl.wired, sl.ctrl != nil, sl.get != nil, sl.evals,
+			sl.child != nil, shortTplKey(i.tpl))
+		if f, ok := sl.ctrl.(*For); ok {
+			f.mu.Lock()
+			n := len(f.order)
+			fb := f.bctx != nil
+			fx := f.bctx != nil && f.bctx.effect != nil
+			f.mu.Unlock()
+			fmt.Fprintf(&b, "%s  FOR n=%d bctx=%v effect=%v\n",
+				strings.Repeat("  ", depth), n, fb, fx)
+		}
+		if sl.child != nil {
+			b.WriteString(sl.child.DebugDumpStructural(depth + 1))
+		}
+	}
+	// 递归稳定组件子树（slotComp/slotChild 承载的子实例）。
+	for s, sl := range i.slots {
+		if ch := sl.stableChildComp(); ch != nil {
+			fmt.Fprintf(&b, "%scomp slot=%d kind=%d tpl=%s\n", strings.Repeat("  ", depth), s, int(sl.kind), shortTplKey(ch.tpl))
+			b.WriteString(ch.DebugDumpStructural(depth + 1))
+		}
+	}
+	return b.String()
+}
+
+// shortTplKey 返回模板键的极短摘要（前 12 字符），供 dump 行内识别实例身份。
+func shortTplKey(t Template) string {
+	k := templateKey(t)
+	if len(k) > 12 {
+		k = k[:12]
+	}
+	return k
 }
 
 // dynamicCompKey 返回动态组件插槽当前承载实例的「场景模板身份」。
@@ -338,7 +400,14 @@ func compile(t Template) *compiledTemplate {
 			if cur.Props == nil {
 				cur.Props = map[string]any{}
 			}
-			cur.Props[op.Key] = op.Arg
+			// 静态 style 字符串（style='{"bg":"..."}'）同样展平为后端 props。
+			if flat, ok := flattenStyle(op.Key, op.Arg); ok {
+				for k, pv := range flat {
+					cur.Props[k] = pv
+				}
+			} else {
+				cur.Props[op.Key] = op.Arg
+			}
 		case OpChildText:
 			idx := childOfStack(cur)
 			n := cur.Children[idx]
@@ -372,6 +441,12 @@ func compile(t Template) *compiledTemplate {
 			cur.Handlers[op.Key] = nil
 			if op.Slot >= 0 && op.Slot < t.N {
 				slots[op.Slot] = &slot{kind: slotEvent, path: childPath(cur), attr: op.Key}
+			}
+		case OpRef:
+			// ref 挂在栈顶元素节点上：不新增节点、不进 Props/Handlers，仅记录目标
+			// 路径。建树时该节点已由 clone 分配 ID，applyAll 里回调 func(*Element)。
+			if op.Slot >= 0 && op.Slot < t.N {
+				slots[op.Slot] = &slot{kind: slotRef, path: childPath(cur)}
 			}
 		case OpComp, OpDynComp:
 			// 组件在场景树里是一个逻辑包装节点（Kind=组件名，Type=NodeFragment 透明透传）。
@@ -407,7 +482,7 @@ func compile(t Template) *compiledTemplate {
 	// 补全未被引用的插槽，避免 nil 解引用（编译期应保证 slot 连续，这里做防御）。
 	for i := range slots {
 		if slots[i] == nil {
-			slots[i] = &slot{kind: slotChild, path: []int{}}
+			slots[i] = &slot{kind: slotNoop, path: []int{}}
 		}
 	}
 	return &compiledTemplate{root: root, slots: slots}
@@ -487,6 +562,7 @@ type Instance struct {
 
 	changes *changeSink // 增量变更缓冲；根实例创建，子实例共享同一 sink
 	bctx    *bindCtx    // 统一接线上下文；动态子树构建后据此递归接线
+	rebound bool        // 是否已用统一 ctx 重接过（首帧独立 effect → app 帧边界）
 }
 
 // Computation 是响应式计算的可销毁句柄。用类型别名统一到 signal 包的定义，
@@ -807,6 +883,31 @@ func mountBranch(s *slot, sub *Instance) {
 	}
 }
 
+// callRef 把 ref getter 的结果当作命令式回调，在节点 ID 已分配后调用一次。
+// 主签名 func(*Element)；兼容 func(any)（GX 侧未注解参数时的通用形态）。
+// 返回保存下来供 Dispose 回填 nil 的回调原值（无有效回调时返回 nil）。
+func (i *Instance) callRef(s *slot, v any) any {
+	if s.node == nil || v == nil {
+		return nil
+	}
+	elem := newElement(s.node.ID, i.changes, s.node, i)
+	switch fn := v.(type) {
+	case func(*Element):
+		if elem != nil {
+			fn(elem)
+		}
+		s.refElem = elem
+		return v
+	case func(any):
+		if elem != nil {
+			fn(elem)
+		}
+		s.refElem = elem
+		return v
+	}
+	return nil
+}
+
 // applyAll 首次填充所有插槽（不计入 Writes——那是「更新」指标）。
 func (i *Instance) applyAll() {
 	for _, s := range i.slots {
@@ -819,7 +920,7 @@ func (i *Instance) applyAll() {
 		case slotChild:
 			embedValue(s, v)
 		case slotAttr:
-			s.node.Props[s.attr] = v
+			i.writeAttr(s, v, false)
 		case slotEvent:
 			// handler 原样存入 Handlers——前端不解释、不校验签名、不进 Props。
 			if s.node.Handlers == nil {
@@ -839,6 +940,9 @@ func (i *Instance) applyAll() {
 			}
 		case slotBranch:
 			attachController(i, s, v)
+		case slotRef:
+			// 一次性挂载语义：建树时 ID 已分配，回调一次 *Element 句柄。
+			s.refCb = i.callRef(s, v)
 		}
 	}
 }
@@ -861,6 +965,10 @@ func (i *Instance) Update() int {
 	i.Updates++
 	written := 0
 	for _, s := range i.slots {
+		// ref 是一次性挂载/卸载语义，不进响应式重新绑定：Update 不重求值 ref getter。
+		if s.kind == slotRef {
+			continue
+		}
 		// 稳定组件子树：slotComp 组件插槽，或 slotChild（children 插槽）首次求值产出
 		// 的 *Instance。getter 只在首次渲染调用一次，之后递归驱动子组件自身的细粒度
 		// 更新；不重新求值 getter、不重建子树——组件实例与局部状态保稳（Issue #1）。
@@ -921,8 +1029,7 @@ func (i *Instance) Update() int {
 			embedValue(s, v)
 			i.recordChildTransition(s.node, old, wasText)
 		case slotAttr:
-			s.node.Props[s.attr] = v
-			i.record(ChangeSetAttr, s.node, s.attr, v)
+			i.writeAttr(s, v, true)
 		case slotEvent:
 			// 事件 handler 换绑（SetGetter/命令式改绑）时更新槽位。
 			if s.node.Handlers == nil {
@@ -969,29 +1076,47 @@ func (n *Node) Handler(name string) any {
 	return n.Handlers[name]
 }
 
-// Dispatch 是便利派发方法：若 name 对应的 handler 是协议推荐的 Handler 签名，
-// 则构造 EventContext 调用之并返回 true；否则返回 false，由后端按自定义签名自行处理。
-// 这不影响自定义事件——handler 原值始终可通过 n.Handler(name) 取得。
-// 只在命中节点本地派发，不冒泡；需要冒泡见 DispatchBubble。
+// Parent 返回父节点（根节点返回 nil）。供后端在命中测试后沿祖先链查找
+// 滚动容器等场景使用——parent 是 host 私有字段，此处是唯一只读出口。
+func (n *Node) Parent() *Node {
+	if n == nil {
+		return nil
+	}
+	return n.parent
+}
+
+// Dispatch 是便利派发方法：按 name 对应 handler 的实际签名调用之——
+//   - func(EventContext)（含 Handler 别名）：传入 ctx；
+//   - func()：无参调用；
+//
+// 两者都返回 true；其它自定义签名返回 false，由后端自行处理（原值仍可经
+// n.Handler(name) 取得）。只在命中节点本地派发，不冒泡；需要冒泡见 DispatchBubble。
 func (n *Node) Dispatch(name string, ctx EventContext) bool {
 	return dispatchLocal(n, name, ctx)
 }
 
 // dispatchLocal 是单节点派发的内部实现，供 Dispatch 与冒泡/捕获共用。
 // 冒泡/捕获时在调用前会更新 ctx.Synthetic.CurrentTarget。
+//
+// handler 是用户传入的函数原值（编译器不再套包装），这里按签名分派：
+// 无参 func() 直接调用，带 ctx 的 func(EventContext) 传入事件上下文。
+// 用 type switch 而非反射，零额外分配；这是事件热路径。
 func dispatchLocal(n *Node, name string, ctx EventContext) bool {
 	if n == nil {
 		return false
 	}
-	h := n.Handler(name)
-	if h == nil {
+	switch fn := n.Handler(name).(type) {
+	case nil:
 		return false
-	}
-	if fn, ok := h.(Handler); ok {
+	case func():
+		fn()
+		return true
+	case func(EventContext): // Handler 是它的别名，显式 Handler 写法也落这里
 		fn(ctx)
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // String 用 TextBackend 把常驻场景树渲染成文本，便于 fmt.Println 直接查看。
@@ -1014,12 +1139,88 @@ func equalValue(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// flattenStyle 把任意属性候选值解释为 Style 的展平结果。
+// 仅当 key=="style" 且值能解释为样式表时返回 (展平map, true)；否则 (nil, false)。
+func flattenStyle(key string, v any) (map[string]any, bool) {
+	if key != "style" {
+		return nil, false
+	}
+	var st Style
+	switch x := v.(type) {
+	case Style:
+		st = x
+	case *Style:
+		if x == nil {
+			return nil, false
+		}
+		st = *x
+	case map[string]any:
+		parsed, err := StyleFromMap(x)
+		if err != nil {
+			return nil, false
+		}
+		st = parsed
+	case string:
+		parsed, err := ParseStyle(x)
+		if err != nil {
+			return nil, false
+		}
+		st = parsed
+	default:
+		return nil, false
+	}
+	out := map[string]any{}
+	for k, pv := range st.Props() {
+		out[k] = pv
+	}
+	return out, true
+}
+
+// writeAttr 把一个 slotAttr 值写入 node.Props，并在 record 模式发增量。
+// 对 Style 值做展平：新增/变更的 key 写入新值，上次写入但本次消失的 key 写空串
+// （后端无属性删除语义，空串使该样式值失效，等价于回退默认）。
+// withRecord=true 时每个变化的 key 都发 ChangeSetAttr。
+func (i *Instance) writeAttr(s *slot, v any, withRecord bool) {
+	flat, isStyle := flattenStyle(s.attr, v)
+	if !isStyle {
+		s.node.Props[s.attr] = v
+		if withRecord {
+			i.record(ChangeSetAttr, s.node, s.attr, v)
+		}
+		s.styleKeys = nil
+		return
+	}
+	// 消失的旧 key → 空串。
+	for _, k := range s.styleKeys {
+		if _, ok := flat[k]; !ok {
+			s.node.Props[k] = ""
+			if withRecord {
+				i.record(ChangeSetAttr, s.node, k, "")
+			}
+		}
+	}
+	// 新增/变更的 key。
+	keys := make([]string, 0, len(flat))
+	for k, pv := range flat {
+		s.node.Props[k] = pv
+		if withRecord {
+			i.record(ChangeSetAttr, s.node, k, pv)
+		}
+		keys = append(keys, k)
+	}
+	s.styleKeys = keys
+	delete(s.node.Props, "style") // style 本身不是后端属性
+}
+
 // SetPart 是 Update 的单插槽版本：直接写入一个值，绕过 getter（命令式更新）。
 func (i *Instance) SetPart(slot int, v any) {
 	if slot < 0 || slot >= len(i.slots) {
 		return
 	}
 	s := i.slots[slot]
+	if s.kind == slotNoop {
+		return
+	}
 	// 动态子树控制器（条件分支 / keyed 列表）：v 是 subtreeController（getter
 	// 每次返回同一稳定对象）。Resolve 在当前 effect 上下文读依赖并重建/复用子树。
 	if s.kind == slotBranch {
@@ -1054,8 +1255,7 @@ func (i *Instance) SetPart(slot int, v any) {
 		embedValue(s, v)
 		i.recordChildTransition(s.node, old, wasText)
 	case slotAttr:
-		s.node.Props[s.attr] = v
-		i.record(ChangeSetAttr, s.node, s.attr, v)
+		i.writeAttr(s, v, true)
 	case slotComp:
 		mountComp(s, v)
 		i.record(ChangeReplaceChildren, s.node, "", nil)
@@ -1086,6 +1286,10 @@ func (i *Instance) BindReactive(effect func(func()) Computation) {
 		return
 	}
 	for s, sl := range i.slots {
+		// ref 不建响应式 effect：它是一次性生命周期回调，signal 变化不重跑。
+		if sl.kind == slotRef {
+			continue
+		}
 		// 稳定组件子树：slotComp 或承载 *Instance 的 slotChild。组件实例常驻，
 		// 递归进子树接线（叶子 + 内部的结构插槽都接）；不为它建 SetPart(getter())
 		// effect——getter 每次产出新 *Instance，重求值会重建子树、丢失局部状态（Issue #1）。
@@ -1167,6 +1371,10 @@ func (i *Instance) bindLeaves(effect func(func()) Computation) {
 		return
 	}
 	for s, sl := range i.slots {
+		// ref 不建响应式 effect：一次性生命周期回调，signal 变化不重跑。
+		if sl.kind == slotRef {
+			continue
+		}
 		// 稳定组件子树（slotComp / 承载 *Instance 的 slotChild）：递归进子树接叶子，
 		// 不为其建 SetPart(getter()) effect（getter 重求值会重建子树，Issue #1）。
 		if ch := sl.stableChildComp(); ch != nil {
@@ -1196,6 +1404,76 @@ func (i *Instance) bindLeaves(effect func(func()) Computation) {
 	}
 }
 
+// rebindWith 把"首帧 Render 期已用独立 effect 接好线的子树"改用统一 ctx 重接。
+// 背景：首帧建树早于 app.bindReactive，此时 For/Branch 的子实例只能用
+// BindReactive(Reactive().Effect) 独立接线——它能更新场景树，但没有 app 的
+// onDirty 帧边界回调，导致后端（尤其增量 FramePresenter）收不到重绘请求。
+// adoptBind 拿到 ctx 后对已存在的子树调用本方法：先停掉旧订阅，再用 ctx.effect
+// 重接叶子与结构，使其变化同样走 app 的帧边界。幂等：已用 ctx 接过则跳过。
+func (i *Instance) rebindWith(ctx *bindCtx) {
+	if i == nil || ctx == nil || ctx.effect == nil {
+		return
+	}
+	i.rebindTree(ctx)
+}
+
+// rebindTree 深度优先遍历整棵实例树（含 slotComp / slotChild 承载的子实例、
+// slotBranch / slotDynamic 的当前子树与控制器内条目），逐层停掉首帧独立 effect
+// 并用统一 ctx 重接叶子与结构。幂等由每层的 rebound 标记保证。
+func (i *Instance) rebindTree(ctx *bindCtx) {
+	if i == nil || ctx == nil || ctx.effect == nil || i.rebound {
+		return
+	}
+	i.rebound = true
+	// 先递归子层，再处理本层——子层的 bindLeaves 由其自身负责。
+	for _, sl := range i.slots {
+		if sl == nil {
+			continue
+		}
+		switch sl.kind {
+		case slotComp, slotChild, slotDynamic:
+			if sl.child != nil {
+				sl.child.rebindTree(ctx)
+			}
+		case slotBranch:
+			if sl.child != nil {
+				sl.child.rebindTree(ctx)
+			}
+			if ctrl := sl.ctrl; ctrl != nil {
+				if forCtrl, ok := ctrl.(*For); ok {
+					forCtrl.mu.Lock()
+					es := make([]*forEntry, 0, len(forCtrl.entries))
+					for _, e := range forCtrl.entries {
+						es = append(es, e)
+					}
+					forCtrl.mu.Unlock()
+					for _, e := range es {
+						if e.inst != nil {
+							e.inst.rebindTree(ctx)
+						}
+					}
+				} else if br, ok := ctrl.(*Branch); ok && br.cur != nil {
+					br.cur.rebindTree(ctx)
+				}
+			}
+		}
+	}
+	// 深灌变更缓冲：首帧建子树时嵌套组件可能落在孤立 sink，导致其 Change
+	// 汇不进 app.Changes（增量后端收不到）。统一改指到根实例树的 sink。
+	if ctx.sink != nil {
+		adoptSinkDeep(i, ctx.sink)
+	}
+	// 停掉首帧独立 effect，再用 ctx 重接本层叶子与结构。
+	for _, c := range i.comps {
+		c.Dispose()
+	}
+	i.comps = nil
+	ctx.withSilent(func() {
+		i.bindLeaves(ctx.effect)
+		i.bindRec(ctx)
+	})
+}
+
 // bindCtx 是结构插槽的统一接线上下文：effect 用于建立订阅，onDirty 在结构
 // 变化后回调（app 层据此重绘）。它沿实例树与动态子树向下传递，保证任意深度的
 // 条件分支 / 列表都用同一套接线，不会在某一层漏掉 effect 或丢失重绘回调。
@@ -1207,6 +1485,7 @@ type bindCtx struct {
 	effect  func(func()) Computation
 	onDirty func()
 	silent  bool
+	sink    *changeSink // 所属实例树的变更缓冲，供首帧子树补接时深灌
 }
 
 // withSilent 在静音状态下执行 fn，结束后恢复原状态（支持嵌套）。
@@ -1239,7 +1518,7 @@ func (i *Instance) BindStructural(effect func(func()) Computation, onDirty ...fu
 	if len(onDirty) > 0 {
 		dirty = onDirty[0]
 	}
-	ctx := &bindCtx{effect: effect, onDirty: dirty}
+	ctx := &bindCtx{effect: effect, onDirty: dirty, sink: i.changes}
 	// 接线期整体静音：各 effect 首次立即执行会读 selector 建子树并调 onDirty，
 	// 但 Render 已画首帧，这些首次回调不该各自触发重绘（N 个结构插槽 = N 帧）。
 	ctx.silent = true
@@ -1251,6 +1530,15 @@ func (i *Instance) BindStructural(effect func(func()) Computation, onDirty ...fu
 func (i *Instance) bindStructure(ctx *bindCtx) {
 	if i == nil || ctx == nil {
 		return
+	}
+	// 深灌统一 sink：本实例首帧 Render 时内部组件 adopt 的是创建期临时 sink，
+	// 上层换共享 sink 时只 adopt 了一层（embedValue/mountComp），嵌套组件的
+	// changes 仍指向孤立 sink——结构变更（For 增删项的 InsertBefore 等）会写进
+	// 无人消费的缓冲，增量后端永远收不到（playground 虚拟滚动实测缺陷根因）。
+	// bindStructure 递归访问所有实例，入口处统一把 i 换到根 sink；控制器内部
+	// （For entries / Branch cur）由各自 adoptBind 下推。
+	if ctx.sink != nil && i.changes != ctx.sink {
+		i.changes = ctx.sink
 	}
 	i.bctx = ctx
 	for s, sl := range i.slots {
@@ -1317,21 +1605,43 @@ func (i *Instance) bindRec(ctx *bindCtx) {
 // Dispose 销毁该实例通过 BindReactive 建立的所有响应式计算，停止订阅并清理。
 // 幂等：多次调用只清理一次。复合子组件的计算由其自身实例负责。
 func (i *Instance) Dispose() {
+	// 丢弃所有尚未执行的 RAF：回调常持有 Element/闭包，销毁后不再触发。
+	i.changes.clearRAF()
+	// 销毁期异常隔离（评审 P1-01/P1-02）：comps 与 slots 的释放逐项单点捕获——
+	// controller 内的 Owner cleanup / 用户 ref 回调 panic 不阻断其余资源释放，
+	// 全部释放完毕后统一上报。
+	var caught []any
 	for _, c := range i.comps {
-		c.Dispose()
+		caught = append(caught, runFuncSafely(c.Dispose)...)
 	}
 	i.comps = nil
 	for _, sl := range i.slots {
 		if ch := sl.stableChildComp(); ch != nil {
-			ch.Dispose()
+			caught = append(caught, runFuncSafely(ch.Dispose)...)
 		}
 		if sl.kind == slotDynamic && sl.child != nil {
-			sl.child.Dispose()
+			caught = append(caught, runFuncSafely(sl.child.Dispose)...)
 		}
 		if sl.kind == slotBranch && sl.ctrl != nil {
-			sl.ctrl.Dispose()
+			caught = append(caught, runFuncSafely(sl.ctrl.Dispose)...)
+		}
+		if sl.kind == slotRef {
+			// 卸载语义：先标记句柄失效，再回调 nil（与建树时的一次性回调对称）。
+			// 支持 func(*Element) 与 func(any) 两种签名。
+			if sl.refElem != nil {
+				sl.refElem.disposeRef()
+			}
+			switch fn := sl.refCb.(type) {
+			case func(*Element):
+				caught = append(caught, runFuncSafely(func() { fn(nil) })...)
+			case func(any):
+				caught = append(caught, runFuncSafely(func() { fn(nil) })...)
+			}
+			sl.refCb = nil
+			sl.refElem = nil
 		}
 	}
+	repanicDisposeErrors(caught)
 }
 
 // ---------- 文本渲染工具（非后端协议） ----------

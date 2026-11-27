@@ -278,7 +278,7 @@ func main() {
 func TestObjectLitRuntimeCtorExpect(t *testing.T) {
 	src := `package main
 import (
-	gxapp "github.com/robertpanvip/gox/runtime/app"
+	gxapp "github.com/robertpanvip/gox-core/runtime/app"
 )
 func main() {
 	_, _ = gxapp.open({ Title: "Gox", Width: 800, Height: 600 })

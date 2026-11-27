@@ -1,8 +1,9 @@
 // Package gxapp 的 Backend 契约入口。
 //
-// 本文件把分散在 app.go / frame.go / dispatcher.go 的后端协议面集中为一份
-// 「Backend Contract」权威声明，并引入 Backend 注册表。它不改变任何既有类型，
-// 只用类型别名把它们聚合为单一入口，因此 host 与所有已实现后端零改动。
+// 本文件是分散在 app.go / frame.go / dispatcher.go 的后端协议面的权威说明，
+// 并引入可选的 Backend 注册表。契约类型（Window / FramePresenter / UIExecutor /
+// Frame）本身定义在各自文件里，本文件不复制别名、不改变任何既有类型，
+// 因此 host 与所有已实现后端零改动。
 //
 // # 两层契约模型（Contract + Adapter）
 //
@@ -37,39 +38,103 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
 )
 
-// ---- 契约别名：把分散定义的协议类型聚合为单一 Backend 入口 ----
+// ---- 契约类型 ----
 //
-// 这些是 type alias（非新类型），与原始类型完全等价，后端可任选其一引用。
-
-// BackendWindow 是窗口生命周期契约（别名自 Window）。
-type BackendWindow = Window
-
-// BackendPresenter 是场景提交契约（别名自 FramePresenter）。
-type BackendPresenter = FramePresenter
-
-// BackendExecutor 是 UI 线程投递契约（别名自 UIExecutor）。
-type BackendExecutor = UIExecutor
-
-// BackendDispatcher 是帧派发契约（别名自 FrameDispatcher）。
-type BackendDispatcher = FrameDispatcher
-
-// BackendFrame 是一次 Host → Backend 的完整提交（别名自 Frame）。
-type BackendFrame = Frame
-
-// BackendConfig 是窗口/后端配置（别名自 WindowConfig）。
-type BackendConfig = WindowConfig
-
-// BackendNode / BackendChange 是场景树与增量数据类型（别名自 gxscene）。
-type BackendNode = gxscene.Node
-type BackendChange = gxscene.Change
+// 后端契约统一使用原始名字 Window / FramePresenter / UIExecutor / Frame，
+// 不再另设 BackendXxx 别名——两套命名只会增加认知负担，且不提供任何额外能力。
+//
+// # Backend 注入：OpenWith 是基础，Register 是可选便利
+//
+// 核心架构只依赖 OpenWith(cfg, win)——装配层直接构造后端实例注入即可工作，
+// 这是拆仓后各后端接入的基础机制。Register / OpenBackend 只是建立在 OpenWith
+// 之上的可选便利层：便于按 cfg.Backend 名字集中装配。核心能力不依赖注册表。
+// Register 允许同名覆盖（后注册者胜），因此注册顺序会影响 OpenBackend 最终选到的实现；
+// 这是有意的替换机制，装配层应保证同名只注册一次或明确覆盖顺序。
 
 // BackendFactory 构造一个后端实例。装配层实现它并注册到注册表。
 // 传入的是已规范化的配置；工厂可据此选择具体窗口实现。
 type BackendFactory func(cfg WindowConfig) (Window, error)
+
+// ---- Backend 接入接口（gx.use(Backend) 的注入点）----
+//
+// 接入层的后端可插拔走接口注入：gxapp 只定义接口形状，具体后端实现它并在
+// 装配处传入（gxapp.Use(rb.NewBackend())）。核心不 import 任何具体后端，
+// 也不做字符串分发——Use(接口值) 是唯一接入路径；注册表（Register /
+// OpenBackend）是窗口级装配的遗留便利层，与接入层无关。
+
+// Backend 是后端接入接口：接入层只依赖这个形状。
+//
+// 必需段只有 Name / NewWindow；其余的进程级能力按**可选能力接口**分段，
+// 后端按需实现、Host 装配时探测（与 Window 的 UIExecutor / WindowBinder
+// 同一模式）。这样接口不会做肥：没有某能力的后端不必返回假实现。
+type Backend interface {
+	// Name 返回后端标识（故障归因 Fault.Backend / 调试输出用）。
+	Name() string
+	// NewWindow 为一扇窗口创建 Window 实例。Host 多窗口下每窗调用一次，
+	// 后端可据此为每窗分配独立资源（事件循环 / 渲染上下文）。
+	// 返回的 Window 生命周期：Host 依次 Open → Draw → Run → Close。
+	NewWindow(cfg WindowConfig) (Window, error)
+}
+
+// ---- Backend 可选能力段（按需实现 + Host 探测）----
+
+// BackendInitializer 进程级生命周期钩子：首个窗口创建前 Init（每个 Backend
+// 实例幂等一次），Host / Handle 全部关闭后 Shutdown。字体库预热、协议握手、
+// 全局资源分配放这里；不需要的后端不实现即可。
+type BackendInitializer interface {
+	InitBackend() error
+	ShutdownBackend()
+}
+
+// BackendInfo 是后端的静态描述（诊断输出 / 能力协商依据）。
+type BackendInfo struct {
+	Name     string // 后端名（同 Backend.Name()）
+	Version  string // 后端版本串（如 "gxbackend-rust 0.3.0"）
+	Protocol string // 渲染协议（如 "GRX3" / "GRX2" / "frame-callback"）
+	Renderer string // 渲染器标识（如 "wgpu+glyphon" / "skia-cpu"）
+}
+
+// BackendDescriptor 能力接口：返回后端静态描述。Host 不解析内容，仅供
+// 装配层诊断打印 / 上层按协议版本分支。
+type BackendDescriptor interface {
+	Describe() BackendInfo
+}
+
+// Capabilities 是后端运行期能力声明：装配层据此决定是否降级 / 告警。
+// 声明 false 不代表功能禁用——后端仍可在 Open 时静默忽略不支持的配置。
+type Capabilities struct {
+	MultiWindow      bool // 单事件循环管理多窗口（P4 目标态）
+	Transparent      bool // 透明 framebuffer（配合无边框做悬浮面板）
+	MousePassthrough bool // 透明区鼠标穿透（XShape / 命中形状）
+	Incremental      bool // 增量帧提交（FramePresenter / delta 协议）
+	VSyncControl     bool // 可编程 vsync（帧时钟硬件同步）
+}
+
+// BackendCapabilities 能力接口：返回能力声明。
+type BackendCapabilities interface {
+	Capabilities() Capabilities
+}
+
+// registryBackend 是 Backend 的包内适配器：把注册表工厂包装成接口值，
+// 只服务 Host.OpenBackendWindow（注册表便利层），不是接入路径——接入唯一
+// 路径是 Use(接口值)。
+type registryBackend struct {
+	name    string
+	factory BackendFactory
+}
+
+// Name 实现 Backend.Name。
+func (b registryBackend) Name() string { return b.name }
+
+// NewWindow 实现 Backend.NewWindow。
+func (b registryBackend) NewWindow(cfg WindowConfig) (Window, error) {
+	if b.factory == nil {
+		return &HeadlessWindow{}, nil
+	}
+	return b.factory(cfg)
+}
 
 // ---- Backend 注册表 ----
 //
@@ -122,6 +187,14 @@ func Backends() []string {
 	registry.mu.RUnlock()
 	sort.Strings(out)
 	return out
+}
+
+// lookupBackend 按名查注册表工厂（Host 多窗口装配用，不打开窗口）。
+func lookupBackend(name string) (BackendFactory, bool) {
+	registry.mu.RLock()
+	f, ok := registry.fact[name]
+	registry.mu.RUnlock()
+	return f, ok
 }
 
 // OpenBackend 按 cfg.Backend 从注册表选择后端并打开应用。

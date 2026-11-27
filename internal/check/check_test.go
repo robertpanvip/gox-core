@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robertpanvip/gox/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
 )
 
 // checkGx 走完整链路：gx 源码 → Compile(降级 + side table) → go/parser AST → GX 诊断。
@@ -192,5 +192,52 @@ func f() {
 		if d.Code == "union-assign" {
 			t.Errorf("块内 x 是 bool，不应报联合赋值: %v", d)
 		}
+	}
+}
+
+// ---------- parse 诊断位置契约 ----------
+
+// TestParseErrorRealPositions 语法失败应逐错误给真实行列，而不是钉死 1:1。
+func TestParseErrorRealPositions(t *testing.T) {
+	c := New(nil, nil)
+	diags, err := c.Check("package main\n\nfunc f() {\n\tx := ;\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit := false
+	for _, d := range diags {
+		if d.Code == "parse" && d.Line >= 4 && d.Col > 0 {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatalf("parse 诊断应指向出错行(>=4)且带真实列, got %v", diags)
+	}
+}
+
+// TestParseErrorMultiple 多处语法错误应产出多条诊断（AllErrors），不再只报一条。
+func TestParseErrorMultiple(t *testing.T) {
+	c := New(nil, nil)
+	diags, _ := c.Check("package main\nfunc f( {\n}\nfunc g( {\n}\n")
+	n := 0
+	for _, d := range diags {
+		if d.Code == "parse" {
+			n++
+		}
+	}
+	if n < 2 {
+		t.Fatalf("多处语法错误应产出多条诊断, got %d: %v", n, diags)
+	}
+}
+
+// TestParseErrorEmptySource InvalidGo 清空产物时不得产出 EOF 噪音诊断。
+func TestParseErrorEmptySource(t *testing.T) {
+	c := New(nil, nil)
+	diags, err := c.Check("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 {
+		t.Fatalf("空源码不应产生 parse 噪音: %v", diags)
 	}
 }

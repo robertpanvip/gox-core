@@ -21,7 +21,7 @@ func main() { _ = CardProps{} }
 		`name Signal.Signal[string]`,
 		`count Signal.Signal[int]`,
 		`age int`,
-		`import Signal "github.com/robertpanvip/gox/runtime/signal"`,
+		`import Signal "github.com/robertpanvip/gox-core/runtime/signal"`,
 	)
 	if strings.Contains(got, "var name any") || strings.Contains(got, "sig name") {
 		t.Errorf("sig 字段不应残留旧降级形态:\n%s", got)
@@ -177,7 +177,7 @@ func main() { p := CardProps{name: "x"}; println(p.name) }
 // 否则把 Signal 函数当值插入界面（编译通过但显示函数地址）。
 func TestSignalFieldJSXSelectorReadAddsCall(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 func Card(p CardProps) *gxscene.Instance { return <div>{p.name}</div> }
 func main() {
@@ -192,7 +192,7 @@ func main() {
 // 2.2：sig 变量传给 sig 字段 → 直通 getter（保鲜），不再生成 title() 非法 Go。
 func TestSignalFieldJSXPropPassthrough(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 func Card(p CardProps) *gxscene.Instance { return nil }
 func main() {
@@ -210,7 +210,7 @@ func main() {
 // 2.3：字面量传给 sig 字段 → 自动包 Signal.New，不再编译期类型错。
 func TestSignalFieldJSXPropLiteralWrapped(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 func Card(p CardProps) *gxscene.Instance { return nil }
 func main() { _ = <div><Card name="lit"/></div> }
@@ -223,7 +223,7 @@ func main() { _ = <div><Card name="lit"/></div> }
 // 保鲜，且该 For 仍走 ForGetterOfSignal 零重建（逃逸豁免语义成立）。
 func TestSignalFieldJSXForItemDerivedComputed(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 type CardProps struct { sig name string }
 func Card(p CardProps) *gxscene.Instance { return nil }
@@ -243,7 +243,7 @@ func main() {
 // 直通 getter（不 New、不 Computed），与手写结构体赋值语义一致（用户要求）。
 func TestSignalFieldJSXFieldToFieldPassthrough(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 type WrapProps struct { sig inner string }
 func Card(p CardProps) *gxscene.Instance { return <div>{p.name}</div> }
@@ -263,7 +263,7 @@ func main() { _ = <Wrap inner="hello"/> }
 // {u.name} 不得被补成 u.name()（那是硬编译错误：string is not a function）。
 func TestJSXSelectorNotTouchSameNamePlainField(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 type User struct { id int; name string }
 func main() {
@@ -282,7 +282,7 @@ func main() {
 // 同名字段不得误补；而真正的 sig 字段 selector 仍要补 ()。
 func TestJSXSelectorNestedFieldByReceiverType(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Addr struct { city string }
 type User struct { addr Addr }
 type CardProps struct { sig name string }
@@ -308,7 +308,7 @@ import "fmt"
 type CardProps struct { sig name string }
 func main() {
 	sig n = 1
-	p := CardProps{name: fmt.Sprint(n())}
+	p := CardProps{name: fmt.Sprint(n)}
 	_ = p
 }
 `
@@ -323,7 +323,7 @@ func main() {
 // 调用点生成 &CardProps{...}（而非匿名 struct），组件体内 sig 字段读补 ()。
 func TestPointerPropsComponent(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct { sig name string }
 func Card(p *CardProps) *gxscene.Instance { return <div>{p.name}</div> }
 func main() { _ = <Card name="x"/> }
@@ -497,7 +497,7 @@ func main() {
 func TestSignalFieldAddrOmittedTypeLit(t *testing.T) {
 	src := `package main
 type CardProps struct { sig name string; title string }
-func Card(p *CardProps) { println(p.name(), p.title) }
+func Card(p *CardProps) { println(p.name, p.title) }
 func main() {
 	sig n = "nn"
 	Card(&{name: n, title: "t"})
@@ -518,6 +518,7 @@ func main() {
 	sig n = "x"
 	m := map[string]P{"k": {a: n}}
 	s := []P{{a: n}, {a: "lit"}}
+	_ = s.map(func(v P) P { return v }) // 触发按需提升
 	_, _ = m, s
 }
 `
@@ -536,7 +537,7 @@ func main() {
 func TestSignalFieldPtrExplicitLitGetsAmp(t *testing.T) {
 	src := `package main
 type CardProps struct { sig name string }
-func Card(p *CardProps) { println(p.name()) }
+func Card(p *CardProps) { println(p.name) }
 func main() {
 	sig n = "nn"
 	Card(CardProps{name: n})
@@ -582,7 +583,8 @@ func main() {
 	}
 }
 
-// 链式两段都是 sig + 已是调用式：每段各补一次，不重复补（防 c.n()()）。
+// 链式两段都是 sig：每段各补一次调用，不重复补（防 c.n()()）。
+// 用户按透明变量写 o.mid.b.v，编译器补成 o.mid.b().v()。
 func TestSignalFieldChainTwoSignalNoDoubleCall(t *testing.T) {
 	src := `package main
 type Leaf struct { sig v string }
@@ -590,7 +592,7 @@ type Mid struct { sig b Leaf }
 type Outer struct { mid Mid }
 func main() {
 	o := Outer{mid: Mid{b: Leaf{v: "hi"}}}
-	println(o.mid.b().v(), o.mid.b.v)
+	println(o.mid.b.v, o.mid.b.v)
 }
 `
 	got := compileOK(t, "sf8_twochain.gx", src)
@@ -631,7 +633,7 @@ func main() {
 // 同上，JSX sig prop 走同一入口，产物一致（判据不分裂）。
 func TestSignalFieldChainRWGetterJSX(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Leaf struct { sig c string }
 type Mid struct { sig b Leaf }
 type Outer struct { mid Mid }
@@ -699,7 +701,7 @@ type Outer struct { mid Mid }
 type Q struct { sig v string }
 func main() {
 	o := Outer{mid: Mid{b: Leaf{c: "x"}}}
-	q := Q{v: o.mid.b().c() + "!"}
+	q := Q{v: o.mid.b.c + "!"}
 	_ = q; _ = o
 }
 `
@@ -808,10 +810,11 @@ func main() { Card(&{inner: {v: "x"}}) }
 	containsAll(t, got, `&Out{inner: Inner{v: Signal.New("x")}}`)
 }
 
-// 第十一轮：中间 sig 段用户显式写调用括号（m.leaf().v）时，读写改写必须
-// 跳过该括号走到真正链尾，而不是在 '(' 处断链漏改写。与裸写 m.leaf.v 产物一致。
+// 第十一轮：中间 sig 段（m.leaf）的链尾读写必须走到真正链尾 v，而不是在
+// leaf 处断链漏改写。sig 字段一律裸写：显式 m.leaf() 由检查器拦截（见
+// checkNoExplicitSigCall），裸写 m.leaf.v 的链尾写产物应是 m.leaf().v(...)。
 func TestR11ExplicitParenMiddleSegment(t *testing.T) {
-	write := `package main
+	explicit := `package main
 type Leaf struct { sig v string }
 type Mid struct { sig leaf Leaf }
 func main() {
@@ -820,8 +823,10 @@ func main() {
 	_ = m
 }
 `
-	got := compileOK(t, "r11_write.gx", write)
-	containsAll(t, got, `m.leaf().v( "c")`)
+	if _, err := Compile("r11_explicit.gx", explicit); err == nil ||
+		!strings.Contains(err.Error(), "sig 字段") {
+		t.Errorf("显式调用中间 sig 段 m.leaf() 应被拦截，got: %v", err)
+	}
 
 	bare := `package main
 type Leaf struct { sig v string }
@@ -842,7 +847,7 @@ type Leaf struct { sig n int }
 type Mid struct { sig leaf Leaf }
 func main() {
 	m := Mid{leaf: Leaf{n: 1}}
-	m.leaf().n += 2
+	m.leaf.n += 2
 	_ = m
 }
 `
@@ -853,18 +858,18 @@ func main() {
 	}
 }
 
-// 第十一轮：JSX props / 插值里的显式括号中间段同样走到链尾。
-func TestR11JSXExplicitParenMiddleSegment(t *testing.T) {
+// 第十一轮：JSX props / 插值里的裸写中间 sig 段同样走到链尾（用户不写 ()）。
+func TestR11JSXMiddleSigSegment(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Leaf struct { sig v string }
 type Mid struct { sig leaf Leaf }
 type CardProps struct { sig title string }
 func Card(p CardProps) *gxscene.Instance { return <div>{p.title}</div> }
 func main() {
 	m := Mid{leaf: Leaf{v: "a"}}
-	_ = <Card title={m.leaf().v}/>
-	_ = <div>{m.leaf().v}</div>
+	_ = <Card title={m.leaf.v}/>
+	_ = <div>{m.leaf.v}</div>
 	_ = m
 }
 `
@@ -915,7 +920,7 @@ func main() {
 // 第十轮 P1-5：JSX props 里索引 receiver m["k"].v 必须作为 sig 透传（不双重包装）。
 func TestR11JSXIndexReceiver(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { sig v string }
 type CardProps struct { sig v string }
 func Card(props CardProps) *gxscene.Instance { return nil }
@@ -937,7 +942,7 @@ func main() {
 // 第十轮 P1-4+P1-5：JSX props 里多层索引 receiver 也应正确透传。
 func TestR11JSXMultiLevelIndexReceiver(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { sig v string }
 type CardProps struct { sig v string }
 func Card(props CardProps) *gxscene.Instance { return nil }
@@ -976,7 +981,7 @@ func main() {
 // 第十轮 P2-2：JSX props 传复合字面量，内层 sig 字段必须递归包装。
 func TestR11JSXCompositePropInnerWrap(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Leaf struct { sig v string }
 type CardProps struct { sig label Leaf }
 func Card(props CardProps) *gxscene.Instance { return nil }
@@ -1320,4 +1325,202 @@ func main() {
 
 	// 规则 1（写）：普通字段写仍是标准 Go 赋值，sig 字段写是调用式。
 	containsAll(t, got, `r.v = "x"`, `l.plain = "z"`)
+}
+
+// 回归：泛型 struct `type Box[T any] struct { sig value T }` 的 sig 字段必须
+// 被识别并降级。修复前 collectSignalFieldDecls/buildSignalFieldTable 要求类型名
+// 后紧跟 struct，被 `[T any]` 打断，导致 sig 漏给局部逻辑生成非法 `var`。
+func TestGenericStructSigField(t *testing.T) {
+	src := `package main
+type Box[T any] struct {
+    sig value T
+}
+func NewBox[T any](v T) *Box[T] { return &Box[T]{value: v} }
+func read(b *Box[int]) int { return b.value }
+`
+	got := compileOK(t, "genericsig.gx", src)
+	containsAll(t, got,
+		`value Signal.Signal[T]`,          // sig 字段降级（泛型参数保留）
+		`return &Box[T]{value: v}`,         // 构造字面量不被误包装
+		`return b.value()`,                 // 泛型 receiver 的 sig 字段读补 ()
+		`import Signal "github.com/robertpanvip/gox-core/runtime/signal"`,
+	)
+}
+
+// 回归：sig 字段赋值右侧的 sig 字段读必须补 ()。用户按透明变量写 `s.x = s.y`，
+// 编译器降级后应是 `s.x(s.y())`（取值传入）；此前右侧原样搬运产出 `s.x(s.y)`，
+// 把 Signal 函数当值传入导致类型错误。复合赋值 `+=` 同理。
+func TestSigFieldAssignRHSReadGetsCall(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{
+			"赋值",
+			"package main\ntype S struct{ sig x int; sig y int }\nfunc main(){ s := S{x:1,y:2}; s.x = s.y; _ = s }",
+			`s.x( s.y())`,
+		},
+		{
+			"复合赋值",
+			"package main\ntype S struct{ sig x int; sig y int }\nfunc main(){ s := S{x:1,y:2}; s.x += s.y; _ = s }",
+			`s.x(s.x() +  s.y())`,
+		},
+		{
+			"表达式右侧",
+			"package main\ntype S struct{ sig x int; sig y int }\nfunc main(){ s := S{x:1,y:2}; s.x = s.y + 1; _ = s }",
+			`s.x( s.y() + 1)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileOK(t, "rhs.gx", tc.src)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("赋值右侧 sig 读应补 ()，期望含 %q:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// JSX 片段（插值 / 属性槽 / 事件体）里的 sig 字段读写改写与规范拦截。
+// 片段是重新词法化的独立 token，主流程 checkNoExplicitSigCall /
+// rewriteSignalFieldRefs 都穿透不到，全靠 rewriteJSXSignalFieldSelectors。
+// 历史 bug：事件体里 s.x = 2 曾产出非法的 s.x() = 2（go/parser 语法层接受、
+// InvalidGo 闸门拦不住，只有真实 go build 才炸）；显式调用 s.x() 在 fragment
+// 里也不报错（主检查器只覆盖 sig 变量）。本测试守护两条防线。
+func TestJSXFragmentSigFieldReadWrite(t *testing.T) {
+	compact := func(s string) string {
+		return strings.Join(strings.Fields(s), "")
+	}
+	// 写形态：产物必须与主流程改写一致（p.name( 值 )），不得残留 s.x() = 形态。
+	writes := []struct{ name, src, want string }{
+		{
+			"事件体字段写",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ s.x = 2 }}>a</button> }",
+			"s.x(2)",
+		},
+		{
+			"事件体字段复合写",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ s.x += 2 }}>a</button> }",
+			"s.x(s.x()+2)",
+		},
+		{
+			"事件体字段自增",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ s.x++ }}>a</button> }",
+			"s.x(s.x()+1)",
+		},
+		{
+			"事件体字段自减",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ s.x-- }}>a</button> }",
+			"s.x(s.x()-1)",
+		},
+		{
+			"事件体字段写RHS含字段",
+			"package main\ntype S struct{ sig x int; sig y int }\nfunc main(){ s := S{x:1, y:2}; _ = <button onClick={func(){ s.x = s.y + 1 }}>a</button> }",
+			"s.x(s.y()+1)",
+		},
+	}
+	for _, tc := range writes {
+		t.Run("write_"+tc.name, func(t *testing.T) {
+			got := compact(compileOK(t, "frag_write.gx", tc.src))
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("片段字段写应改写为 %q，got:\n%s", tc.want, got)
+			}
+			if strings.Contains(got, "s.x()=") {
+				t.Errorf("不得残留非法的 s.x() = 形态:\n%s", got)
+			}
+		})
+	}
+	// 显式调用：三入口全部报错（与主 token 流 checkNoExplicitSigCall 同源）。
+	forbidden := []struct{ name, src string }{
+		{
+			"插值内显式调用",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <div>{s.x()}</div> }",
+		},
+		{
+			"属性槽显式调用",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <div title={s.x()}/> }",
+		},
+		{
+			"事件体显式调用",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ s.x() }}>a</button> }",
+		},
+		{
+			"箭头事件显式调用",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={() => s.x()}>a</button> }",
+		},
+	}
+	for _, tc := range forbidden {
+		t.Run("forbid_"+tc.name, func(t *testing.T) {
+			_, err := Compile("frag_call.gx", tc.src)
+			if err == nil || !strings.Contains(err.Error(), "sig 字段") {
+				t.Errorf("%s 应被拦截，got: %v", tc.name, err)
+			}
+		})
+	}
+	// 不误伤：裸读 / 比较运算 / 普通字段写 / For item getter 字段读。
+	type al struct{ name, src, want string }
+	allowed := []al{
+		{
+			"事件体裸读",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ _ = s.x }}>a</button> }",
+			"func(){ _ = s.x() }",
+		},
+		{
+			"事件体比较运算",
+			"package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; _ = <button onClick={func(){ if s.x == 2 { _ = 1 } }}>a</button> }",
+			"s.x() == 2",
+		},
+		{
+			"普通字段写不补括号",
+			"package main\ntype S struct{ sig x int; z int }\nfunc main(){ s := S{z:0}; _ = <button onClick={func(){ s.z = 2 }}>a</button> }",
+			"s.z = 2",
+		},
+		{
+			"For key lambda 字段读",
+			"package main\ntype U struct{ sig name string }\nfunc main(){ us := []U{{name: \"a\"}}; _ = <For each={us} key={(u) => u.name}>{(u U) => <div>{u.name}</div>}</For> }",
+			"u.name()",
+		},
+	}
+	for _, tc := range allowed {
+		t.Run("allow_"+tc.name, func(t *testing.T) {
+			got := compact(compileOK(t, "frag_allow.gx", tc.src))
+			if !strings.Contains(got, compact(tc.want)) {
+				t.Errorf("期望含 %q，got:\n%s", tc.want, got)
+			}
+		})
+	}
+}
+
+// 遗留缺陷回归：函数值链上的 sig 字段裸读漏改写。
+// `state := callIt`（裸函数名 = 函数值）→ `t := state()` → `t.text` 的链首
+// 类型推断依赖绑定 Type——此前两档都不推断（state.Type 空、t.Type 空），
+// sig 字段读静默产出漏 () 的 t.text，运行期把 Signal 函数值当字符串用。
+// 现在 bindLHS 记录函数值类型并在函数值调用处剥出返回类型。
+func TestSigFieldReadThroughFuncValueChain(t *testing.T) {
+	src := `package main
+
+pub type Term struct {
+	sig text string
+}
+
+func getTerm() *Term {
+	return &Term{text: "hi"}
+}
+
+func callIt() *Term {
+	return getTerm()
+}
+
+func main() {
+	state := callIt
+	t := state()
+	println(t.text)
+}
+`
+	res, err := Compile("funcchain.gx", src)
+	if err != nil {
+		t.Fatalf("Compile 失败: %v", err)
+	}
+	got := res.GoSource
+	if !strings.Contains(got, "println(t.text())") {
+		t.Fatalf("函数值链上的 sig 字段读应补 ():\n%s", got)
+	}
+	assertNotContains(t, got, "println(t.text)\n", "不得残留漏 () 的读")
 }

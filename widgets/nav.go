@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // 导航类组件：Tabs / Segmented。
@@ -55,8 +55,8 @@ func Tabs(props gxscene.Props) *gxscene.Instance {
 	// 标签栏
 	ops = append(ops,
 		el("div"), attr("flex-direction", "row"), attr("gap", "2"),
-		attr("border", ThemeBorder), attr("border-width", "1"),
-		attr("border-radius", "8"), attr("padding", "3"), attr("bg", ThemePanel),
+		attr("border", ThemeBorder), attr("border-width", HairlineWidth),
+		attr("border-radius", RadiusControl), attr("padding", "3"), attr("bg", ThemePanel),
 		gxscene.Op{Code: gxscene.OpFor, Slot: tabForSlot},
 		closeEl(),
 	)
@@ -119,7 +119,8 @@ func tabItem(index int, o Option, value func() string, tone string, onChange gxs
 	)
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "tab"),
-		attr("padding", "8"), attr("border-radius", "6"),
+		attr("height", ControlHeightSmall), attr("padding", "6"), attr("border-radius", RadiusSmall),
+		attr("font-size", FontBody),
 		attr("align-items", "center"), attr("justify-content", "center"),
 		attr("transition", "bg 160ms ease, color 160ms ease"),
 		event("onClick", clickSlot),
@@ -148,7 +149,7 @@ func tabItem(index int, o Option, value func() string, tone string, onChange gxs
 		},
 		func() any {
 			if active() {
-				return "#07130f"
+				return ThemeOnAccent
 			}
 			return ThemeMuted
 		},
@@ -223,8 +224,8 @@ func Segmented(props gxscene.Props) *gxscene.Instance {
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "segmented"),
 		attr("flex-direction", "row"), attr("gap", "2"),
-		attr("border", ThemeBorder), attr("border-width", "1"),
-		attr("border-radius", "8"), attr("padding", "3"), attr("bg", ThemePanel),
+		attr("border", ThemeBorder), attr("border-width", HairlineWidth),
+		attr("border-radius", RadiusControl), attr("padding", "3"), attr("bg", ThemePanel),
 	}
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))

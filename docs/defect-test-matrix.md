@@ -12,8 +12,8 @@
 | 条目 | 问题 | 处理 | 回归测试 | 诊断码 / 产物 |
 |---|---|---|---|---|
 | A1 | `<For>` 渲染体内函数局部 sig 显示函数地址 | render body 转换期锁定 `jsxPos`，sig 裸读补 `()` | `TestForBodyRewritesFunctionLocalSignals` / `TestForBodySignalRewriteNoRegression` | 产物：`n()` |
-| A2 | `class` 对象语法 → `{true true}` | 诊断化 | `TestUnsupportedAttrDiagnostics` / `TestForEmptyAttrDiagnostic` | `attr-unsupported` |
-| A3 | `style` 对象语法 → `{red}` | 诊断化 | `TestUnsupportedAttrDiagnostics` | `attr-unsupported` |
+| A2 | `class` 对象语法 → `{true true}` | 诊断化（class 仍不支持对象字面量） | `TestUnsupportedAttrDiagnostics` / `TestForEmptyAttrDiagnostic` | `attr-unsupported` |
+| A3 | `style` 对象语法 → `{red}` | 已支持：`style={{...}}` 编译成强类型 `gxscene.Style{...}`（驼峰 key、伪状态单词 key） | `TestStyleObjCamelKeysAndValues` / `TestStyleObjPseudoNested` | 产物：`gxscene.Style{...}` |
 | A4 | `<For empty={...}>` 静默丢弃 | 报未知属性 + 条件分支修法 | `TestForEmptyAttrDiagnostic` | `attr-unsupported` |
 | A5 | 未知属性名静默进产物 | 高置信拼错诊断（`bind:` 前缀、事件名手误），不设封闭白名单 | `TestUnknownAttrDiagnostic` / `TestUnknownAttrNoFalsePositive` | `attr-unknown` |
 | A6 | JSX 内 `for range` 产坏 Go | 诊断化 + 不产文本节点 | `TestJSXControlStatementDiagnostic` | `jsx-control-statement` |
@@ -27,7 +27,7 @@
 | B2 | 嵌套 `<For>` 内层推成 `any` | 从外层 item 类型反查 struct 字段，逃逸也登记类型 | `TestB2NestedForElemType` | 产物：`ForGetterOfSignal[Cell]` |
 | B3 | `each={getter}` 不自动调用 | `funcLitResultType` + getter 变量补 `()` | `TestB3GetterVariableEach` | 产物：`return rows()` |
 | B4 | sig 持 struct 字段赋值编不过 | 深写诊断（整体替换修法） | `TestSignalDeepWriteDiagnostic` | `signal-deep-write` |
-| B6 | 事件箭头赋值产非法 Go | 诊断化 + func 字面量修法 | `TestEventArrowAssignDiagnostic` | `event-arrow-statement` |
+| B6 | 事件箭头赋值产非法 Go | 传入函数原值、不加包装：箭头只展开成 Go func 字面量，具名函数/func 字面量/显式 Handler 原样透传 | `TestEventHandlerSimplifiedForms` | 产物：函数原值（不含 `gxscene.Handler(` 包装） |
 | B7 | sig 字段简写 `P{v}` 编不过 | `stripSoleSignalShorthand` | `TestStructSignalFieldShorthand` | 产物：`P{v()}` 形态 |
 | B8 | computed 返回对象字面量产非法 Go | lambda body 对象字面量判定 | `TestComputedArrowObjectLiteral` / `TestLambdaBlockBodyStillWorks` | 产物：匿名 struct |
 | B9 | 组件多根 / `return if` 非法 Go | 诊断化 | `TestJSXMultiRootAndReturnIfDiagnostics` | `jsx-multi-root` / `jsx-return-if` |
@@ -42,7 +42,7 @@
 | C2 | sig slice 改元素字段不刷新（唯一静默错值） | 带索引链深写诊断 | `TestC2SignalSliceElemDeepWriteDiag` + 2 守护 |
 | C3 | 嵌套列表两层类型注解 | B2 修复后内层可推断 | `TestB2NestedForElemType` |
 | C4 | 组件多根要包 div | B9 诊断化（明确修法） | `TestJSXMultiRootAndReturnIfDiagnostics` |
-| C5 | 事件只能写 func 字面量 | B6 诊断化 | `TestEventArrowAssignDiagnostic` |
+| C5 | 事件只能写 func 字面量 | 已解除：具名函数 / 箭头 / func 字面量均可，传函数原值 | `TestEventHandlerSimplifiedForms` |
 | C6 | props getter 只读（设计选择） | 文档说明绕法 | `docs/language-spec.md` §11 |
 | C7 | sig 作实参读成当前值（设计选择） | 文档说明 | `docs/language-spec.md` §11 |
 
@@ -58,6 +58,18 @@
 即"至少 2 个 Transform 不再各自扫 token 判断变量身份"的验收已满足（≥4 个）。`jsxSceneCtx`
 仍持 `bindings`/`sigs`/`sigTypes`/`signalFields` 多源，但 sig 识别规则已统一走 `Bindings`，
 剩余字段是 JSX 场景特有的类型/位置信息，非重复来源。
+
+## D 组：遗留实现债清偿（is 守卫 / let / lambda 推断 / 嵌套深写）
+
+| 条目 | 问题 | 处理 | 回归测试 | 诊断码 / 产物 |
+|---|---|---|---|---|
+| D1 | `let x = 42` 透传成非法 Go（降级耦合在 transformSignals 的 HasSignal 短路后，纯 let 文件不生效） | `transformLetDecls` 无条件执行：`let x = v` → `x := v`，`let x T = v` → `var x T = v` | `TestLetDeclWithoutSignal` / `TestLetDeclTyped` / `TestLetDeclMixedWithSig` | 产物：`x := 42` |
+| D2 | lambda 返回类型误推：`() => users[0].name` 被字面量兜底判成下标 `0` 的 int（扫描不追踪括号深度） | 字面量/字符串兜底只认顶层 token；字段访问推断扩展到索引链 `users[0].name`、多级链与 `*T` 解引用（基础类型可来自 Bindings） | `TestLambdaResultIndexChainField` / `TestLambdaResultSliceElemChain` | 产物：`func() string` |
+| D3 | 局部 sig 嵌套深写漏报：`p.inner.n = 5` 左剥遇到中间 `.field` 段就断，产物 `p().Inner.N = 5` 静默不刷新 | `checkSignalValueDeepWrite` 左剥泛化为「索引 + 中间字段段」；文案区分单层/嵌套/切片三形态 | `TestSignalDeepWriteNestedChain` | `signal-deep-write` |
+| D4 | JSX 事件体/插值内的 sig 深写完全不检测（片段是重新词法化的整体 token） | `lexExprScene` 片段改写后按已解析的 effective sig 集合复跑深写检查，坐标回投 JSX 根 | `TestSignalDeepWriteJSXEventBody` | `signal-deep-write` |
+| D5 | is 守卫只支持最简形态：复合条件 `v is int && len(v) > 0` 硬报错、selector 守卫 `b.val is int` 不支持 | 守卫位于条件首位且尾部只有 `&&` 链时：comma-ok 前置 + 尾部 recv 读替换 + then 块收窄；selector 守卫块内链读替换为收窄临时变量（写目标保持字段赋值）；`\|\|` 破坏收窄语义保持报错 | `TestTypeGuardCompoundAndTail` / `TestTypeGuardCompoundTailOnlyUse` / `TestTypeGuardCompoundOrRejected` / `TestTypeGuardSelectorEndToEnd` | 产物：`; ok && <tail>` |
+| D6 | struct 字段联合类型漏擦除：`pub val int \| string` 因字段解析的 pub 前缀偏移产出非法 Go `Val int \| string` | `fieldRoots` 剥 pub 关键字后再走两标识符启发式 | `TestUnionEraseStructFieldWithPub` | 产物：`Val any` |
+| D7 | 底层 API 别名绕过：检查器只认字面 `Signal` 包名且 BkImport 命中即放行——任意别名（显式 Signal / 无别名 signal / 自定义 sr）导入 signal runtime 后 `Signal.New/Effect/Batch` 全部绕过 | 方案 B：`Binding` 增加 `ImportPath`（scanImport 回填），`checkNoRawSignalAPI` 按 import 身份判定包名引用，别名路径全堵死；类型位置 / 小写语法糖 / 同名变量遮蔽照常放行 | `TestNoRawSignalAPIImportAliasBlocked` / `TestNoRawSignalAPIImportAliasLegalUses` | 错误：`不允许直接调用底层 API sr.Effect` |
 
 ## 运行
 

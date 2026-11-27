@@ -3,8 +3,8 @@ package lsp
 import (
 	"testing"
 
-	"github.com/robertpanvip/gox/internal/buildcheck"
-	"github.com/robertpanvip/gox/internal/check"
+	"github.com/robertpanvip/gox-core/internal/buildcheck"
+	"github.com/robertpanvip/gox-core/internal/check"
 )
 
 func TestToGxDiagnostics(t *testing.T) {
@@ -35,7 +35,7 @@ func f(v int | string) {
 func main() { f(1) }
 `
 	checker := buildcheck.New(8)
-	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.3")
+	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.4")
 	diags, _, err := compileAndCheck(src, checker)
 	if err != nil && len(diags) == 0 {
 		t.Fatalf("compileAndCheck 应返回诊断: %v", err)
@@ -56,7 +56,7 @@ func TestCompileAndCheckCleanCode(t *testing.T) {
 func main() { println("ok") }
 `
 	checker := buildcheck.New(8)
-	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.3")
+	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.4")
 	diags, _, _ := compileAndCheck(src, checker)
 	if len(diags) != 0 {
 		t.Fatalf("干净代码应无诊断: %+v", diags)
@@ -65,11 +65,12 @@ func main() { println("ok") }
 
 func TestCompileErrorDiagnostic(t *testing.T) {
 	// 转译失败也应产出一条 0:0 诊断供 LSP 展示。
-	// 用复合条件中的残留 is 守卫触发 Compile 错误。
+	// 守卫位于条件首位的 && 复合条件现已支持收窄（不再报错）；
+	// 改用守卫不在条件首位的形态触发 Compile 错误（comma-ok 无法前置，保持报错）。
 	src := `package main
 func f() {
     var v int | string = 1
-    if v is int && v == 1 {
+    if v == 1 && v is int {
     }
 }
 `

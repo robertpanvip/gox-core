@@ -26,6 +26,7 @@ type Branch struct {
 	init     bool        // 是否已完成首次求值（idx 初始为 0，需要区分「从未求值」）
 	sink     *changeSink // 所属实例树的变更缓冲，传给各分支子实例
 	bctx     *bindCtx    // 统一接线上下文，传给新建的分支子树
+	scope    Owner       // 建树期捕获的 Owner；分支切换重建子树时恢复它以继承 Context
 }
 
 // NewBranch 创建一个条件分支控制器。
@@ -34,7 +35,10 @@ type Branch struct {
 //
 // selector/builders 为 nil 或空时，Resolve 返回 nil（渲染空）。
 func NewBranch(selector func() int, builders ...func() *Instance) *Branch {
-	return &Branch{selector: selector, builders: builders, idx: -1}
+	return &Branch{
+		selector: selector, builders: builders, idx: -1,
+		scope: Reactive().CurrentOwner(),
+	}
 }
 
 // BranchGetter 是编译器生成条件分支时使用的工厂：它捕获一个稳定的 *Branch，
@@ -95,7 +99,15 @@ func (b *Branch) Resolve() *Instance {
 		// 在新 Owner 下构建并接线子树：子树内的插值 Effect 归属该 Owner，
 		// 分支再次切换/销毁时随之级联清理。
 		b.owner = Reactive().Root(func(o Owner) {
-			cur = b.builders[sel]()
+			// 恢复建树期捕获的 Owner：分支 builder 里的组件函数 / Context.Use
+			// 借此沿正确的 parent 链找到 Provider，避免切换后读到默认 context。
+			var build func()
+			build = func() { cur = b.builders[sel]() }
+			if b.scope != nil {
+				Reactive().RunWithOwner(b.scope, build)
+			} else {
+				build()
+			}
 			if cur != nil {
 				if b.sink != nil {
 					// 递归共享：分支子树 Render 时内部组件已 adopt 到临时 sink，
@@ -152,7 +164,21 @@ func (b *Branch) adoptSinkDeep(s *changeSink) {
 }
 
 // adoptBind 实现 subtreeController：记录统一接线上下文，供 Resolve 构建新分支时递归接线。
-func (b *Branch) adoptBind(ctx *bindCtx) { b.bctx = ctx }
+// 同时对首帧已命中的分支子树补接（同 For：首帧独立 effect 缺 app 帧边界回调）。
+func (b *Branch) adoptBind(ctx *bindCtx) {
+	b.bctx = ctx
+	// 统一 sink：与 For.adoptBind 对称。首帧建树时 b.sink 指向创建期临时 sink，
+	// 后续 Resolve 新分支子树的变更会写进孤立 sink 而丢失。
+	if ctx.sink != nil && b.sink != ctx.sink {
+		b.adoptSinkDeep(ctx.sink)
+	}
+	b.mu.Lock()
+	cur := b.cur
+	b.mu.Unlock()
+	if cur != nil {
+		cur.rebindWith(ctx)
+	}
+}
 
 // Dispose 销毁当前分支作用域（幂等）。级联停止子树内所有 Effect / Cleanup。
 func (b *Branch) Dispose() {

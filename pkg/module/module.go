@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/robertpanvip/gox/pkg/compiler"
-	"github.com/robertpanvip/gox/pkg/sourcemap"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/sourcemap"
 )
 
 // Prefer 定义本地 GX 包与 Go 包同名时的歧义裁决。
@@ -45,18 +45,20 @@ type Project struct {
 	Root       string               // 项目根目录（绝对路径）
 	ModulePath string               // Go module 路径，如 example.com/proj
 	Prefer     Prefer               // 歧义裁决
+	RuntimeModule string            // gox 运行时 module（算 runtime/scene 等 import 路径），默认 compiler.DefaultModule
 	packages   map[string]*GXModule // importPath → 包
 	order      []*GXModule          // 拓扑序（被依赖方在前），Build 时填充
 }
 
 // CompiledFile 是一份 .gx 的转译产物。
 type CompiledFile struct {
-	SourcePath string // .gx 绝对路径
-	GoPath     string // 建议落盘的 .go 路径（与源文件同目录，后缀 .go）
-	Package    string // 所属 GX 包 importPath
+	SourcePath string             // .gx 绝对路径
+	GoPath     string             // 建议落盘的 .go 路径（与源文件同目录，后缀 .go）
+	Package    string             // 所属 GX 包 importPath
 	GoSource   string
 	SourceMap  *sourcemap.SourceMap
 	Analysis   *compiler.Analysis // GX 语义层产物（含大小写诊断），供 check.CheckAll 消费
+	InvalidGo  bool               // 编译器闸门判定产物非法 Go：GoSource 已清空，落盘前必须报错
 }
 
 // LoadProject 从根目录扫描所有 .gx，按 package 分组建立项目视图。
@@ -78,7 +80,8 @@ func LoadProject(root, modulePath string, prefer Prefer) (*Project, error) {
 	}
 	p := &Project{
 		Root: abs, ModulePath: strings.TrimSuffix(modulePath, "/"),
-		Prefer: prefer, packages: map[string]*GXModule{},
+		Prefer: prefer, RuntimeModule: compiler.DefaultModule,
+		packages: map[string]*GXModule{},
 	}
 
 	// 按 (目录, package) 分组。
@@ -290,9 +293,16 @@ func (p *Project) Build(entry string) ([]*CompiledFile, error) {
 				return nil, err
 			}
 			imports := p.importMapFor(string(src))
-			res, err := compiler.CompileWithProject(f, string(src), p.ModulePath, imports)
+			// 运行时 import 路径用 gox 的 module，而非项目 module——
+			// runtime/scene、runtime/signal 等永远在 gox 自己的 module 下。
+			res, err := compiler.CompileWithProject(f, string(src), p.RuntimeModule, imports)
 			if err != nil {
 				return nil, fmt.Errorf("转译 %s: %w", f, err)
+			}
+			// 编译器闸门已把非法产物抑制（InvalidGo、GoSource 清空）：优先报错，
+			// 不再对空产物跑 Validate（会误报 expected 'package' 误导定位）。
+			if res.InvalidGo {
+				return nil, fmt.Errorf("生成 Go 语法无效 %s: 编译产物已被抑制", f)
 			}
 			if err := res.Validate(); err != nil {
 				return nil, fmt.Errorf("生成 Go 语法无效 %s: %w", f, err)
@@ -301,6 +311,7 @@ func (p *Project) Build(entry string) ([]*CompiledFile, error) {
 			out = append(out, &CompiledFile{
 				SourcePath: f, GoPath: goPath, Package: g.ImportPath,
 				GoSource: res.GoSource, SourceMap: res.SourceMap, Analysis: res.Analysis,
+				InvalidGo: res.InvalidGo,
 			})
 		}
 	}

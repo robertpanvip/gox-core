@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // 反馈类组件：Alert / EmptyState / Skeleton。
@@ -19,40 +19,65 @@ func Alert(props gxscene.Props) *gxscene.Instance {
 	tone := gxscene.Get[string](props, "tone")
 	width := gxscene.Get[string](props, "width")
 
-	accent := toneColor(tone())
+	toneName := tone()
+	accent := toneColor(toneName)
+	// 语义图标：Alert 用预制矢量图标替代纯色条旁的信息层级。
+	iconName := alertIconName(toneName)
 	const (
-		titleSlot = iota
+		iconSlot = iota
+		titleSlot
 		msgSlot
 		nSlots
 	)
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "alert"),
-		attr("bg", ThemePanel), attr("border-radius", "8"),
-		attr("padding", "12"), attr("flex-direction", "row"), attr("gap", "10"),
+		attr("bg", ThemePanel), attr("border-radius", RadiusCard),
+		attr("padding", "12"), attr("flex-direction", "column"), attr("gap", "6"),
 	}
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))
 	}
 	ops = append(ops,
-		// 左侧色条
-		el("div"), attr("width", "4"), attr("height", "36"),
-		attr("border-radius", "2"), attr("bg", accent), closeEl(),
-		// 文本列
-		el("div"), attr("flex-direction", "column"), attr("gap", "3"),
-		el("span"), attr("font-size", "14"), attr("weight", "bold"),
+		// 标题行：语义矢量图标 + 标题，垂直居中对齐（macOS 通知/告警样式）。
+		// 图标与标题共用一条 align-items=center 的横轴，避免 canvas 节点按
+		// flex-start 顶部对齐时比标题文字高出一截的错位。
+		el("div"), attr("flex-direction", "row"),
+		attr("align-items", "center"), attr("gap", "8"),
+		gxscene.Op{Code: gxscene.OpComp, Arg: "AlertIcon", Slot: iconSlot},
+		el("span"), attr("font-size", FontHeadline), attr("weight", "bold"),
 		attr("color", accent), dynChild(titleSlot), closeEl(),
-		el("span"), attr("font-size", "13"), attr("color", ThemeMuted),
-		dynChild(msgSlot), closeEl(),
 		closeEl(),
+		// 正文：与标题行同一左边缘起排，保持阅读基线一致。
+		el("span"), attr("font-size", FontBody), attr("color", ThemeMuted),
+		dynChild(msgSlot), closeEl(),
 		closeEl(),
 	)
 	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
+		func() any { return iconNode(iconName, 16, toneName) },
 		func() any { return title() },
 		func() any { return message() },
 	)
 }
 
+// alertIconName 把语义 tone 映射到内置矢量图标名。
+func alertIconName(tone string) string {
+	switch tone {
+	case "success", "green":
+		return "check"
+	case "warning", "orange", "yellow":
+		return "warning"
+	case "danger", "red":
+		return "warning"
+	default:
+		return "info"
+	}
+}
+
 // EmptyState 空状态占位。props: icon, title, description, width。
+//
+// icon 是内置矢量图标名（如 "folder" / "doc" / "tray"，支持别名），经预制图标
+// 系统解析为 canvas 矢量节点；留空默认 "folder"。这是组件库用上自有图标系统的
+// 一部分——不再用 "◻" 之类的字体字符凑数。
 func EmptyState(props gxscene.Props) *gxscene.Instance {
 	icon := gxscene.Get[string](props, "icon")
 	title := gxscene.Get[string](props, "title")
@@ -60,7 +85,8 @@ func EmptyState(props gxscene.Props) *gxscene.Instance {
 	width := gxscene.Get[string](props, "width")
 
 	const (
-		titleSlot = iota
+		iconSlot = iota
+		titleSlot
 		descSlot
 		nSlots
 	)
@@ -72,35 +98,43 @@ func EmptyState(props gxscene.Props) *gxscene.Instance {
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))
 	}
-	ic := icon()
-	if ic == "" {
-		ic = "◻"
-	}
+	// 矢量图标子树（canvas 节点）；颜色走 muted 令牌，跟随明暗主题。
 	ops = append(ops,
-		el("span"), attr("font-size", "34"), attr("color", ThemeMuted),
-		gxscene.Op{Code: gxscene.OpChildText, Arg: ic}, closeEl(),
-		el("span"), attr("font-size", "16"), attr("weight", "bold"),
+		gxscene.Op{Code: gxscene.OpComp, Arg: "EmptyIcon", Slot: iconSlot},
+		el("span"), attr("font-size", FontTitle2), attr("weight", "bold"),
 		attr("color", ThemeText), dynChild(titleSlot), closeEl(),
-		el("span"), attr("font-size", "13"), attr("color", ThemeMuted),
+		el("span"), attr("font-size", FontBody), attr("color", ThemeMuted),
 		dynChild(descSlot), closeEl(),
 		closeEl(),
 	)
 	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
+		func() any {
+			name := icon()
+			if name == "" {
+				name = "folder"
+			}
+			return iconNode(name, 40, "muted")
+		},
 		func() any { return title() },
 		func() any { return desc() },
 	)
 }
 
 // Skeleton 骨架屏占位块。props: width, height, tone, radius。
+//
+// 骨架色用专用令牌 ThemeSkeleton（浅色 #d8d8dd / 深色 #48484a），比次级填充
+// 略深，保证在卡片底上清晰可见又不过分抢眼；通过 dynAttr 接 UseToken getter，
+// 主题切换时自动重绘。tone 显式传入时优先用调用方颜色。
 func Skeleton(props gxscene.Props) *gxscene.Instance {
 	tone := gxscene.Get[string](props, "tone")
 	width := gxscene.Get[string](props, "width")
 	height := gxscene.Get[string](props, "height")
 	radius := gxscene.Get[string](props, "radius")
 
+	const bgSlot = 0
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "skeleton"),
-		attr("bg", resolveColor(tone())), attr("opacity", "0.55"),
+		gxscene.Op{Code: gxscene.OpDynAttr, Key: "bg", Slot: bgSlot},
 	}
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))
@@ -112,8 +146,16 @@ func Skeleton(props gxscene.Props) *gxscene.Instance {
 	}
 	r := radius()
 	if r == "" {
-		r = "4"
+		r = RadiusXSmall
 	}
 	ops = append(ops, attr("border-radius", r), closeEl())
-	return gxscene.Render(gxscene.Template{Ops: ops, N: 0})
+	fallback := tkSkeleton()
+	return gxscene.Render(gxscene.Template{Ops: ops, N: 1},
+		func() any {
+			if c := tone(); c != "" {
+				return resolveColor(c)
+			}
+			return fallback()
+		},
+	)
 }

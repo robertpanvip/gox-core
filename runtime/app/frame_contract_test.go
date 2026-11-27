@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // flakyFrameWindow 是可切换 Present 成败的 FramePresenter，记录每帧快照。

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // ---------- 协议一致性套件（conformance suite）----------

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	gxapp "github.com/robertpanvip/gox/runtime/app"
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxapp "github.com/robertpanvip/gox-core/runtime/app"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // goidFromStack 解析当前 goroutine id（测试独立实现，与被测代码无关）。

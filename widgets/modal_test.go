@@ -3,8 +3,8 @@ package widgets
 import (
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // syncEffect 是测试用的同步 effect：立即执行一次且不依赖调度器，

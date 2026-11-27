@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/robertpanvip/gox/internal/buildcheck"
-	"github.com/robertpanvip/gox/internal/check"
-	"github.com/robertpanvip/gox/internal/lsp"
-	"github.com/robertpanvip/gox/pkg/compiler"
-	"github.com/robertpanvip/gox/pkg/module"
-	"github.com/robertpanvip/gox/pkg/sourcemap"
+	"github.com/robertpanvip/gox-core/internal/buildcheck"
+	"github.com/robertpanvip/gox-core/internal/check"
+	"github.com/robertpanvip/gox-core/internal/lsp"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/module"
+	"github.com/robertpanvip/gox-core/pkg/sourcemap"
 )
 
 func main() {
@@ -33,6 +33,8 @@ func main() {
 		err = cmdCheck(args)
 	case "union", "typeguard", "jsx", "pub", "enum", "collections", "external", "all":
 		err = cmdStage(cmd, args)
+	case "fmt":
+		err = cmdFmt(args)
 	case "sourcemap":
 		err = cmdSourcemap(args)
 	case "map-lookup":
@@ -61,7 +63,7 @@ func usage() {
 
 用法:
   gox build <file.gx> [-o out.go] [-module path] [-check] [-replace old=new] [-root dir] [-prefer gx|go]
-       -module   集合/JSX 运行时的 module 路径（默认 github.com/robertpanvip/gox）
+       -module   集合/JSX 运行时的 module 路径（默认 github.com/robertpanvip/gox-core）
        -check    转译后执行真实 go build，并把错误回投到 .gx 位置
        -replace  go.mod replace 指令，可重复（module=本地目录）
        -root     项目根目录（默认取入口文件所在目录）；启用跨文件 .gx 模块模式
@@ -69,6 +71,8 @@ func usage() {
   gox union|typeguard|jsx|jsxscene|pub|enum|collections|external|all <file.gx>   单步 / 全管线调试
   gox check <file.gx> [-root dir] [-prefer gx|go]        GX 语义层类型检查（AST + side table，含跨文件大小写诊断）
        -root   项目根目录；启用跨文件 GX 模块检查（大小写错误由检查器直接报出）
+  gox fmt [-w|-check] <file.gx>|<dir>...  格式化 GX 源码（JSX 区域按统一规则排版，Go 部分原样保留）
+       默认输出到 stdout；-w 写回文件；-check 仅检查是否已格式化（需要格式化时返回非零）
   gox sourcemap <file.gx> [-o map.json]                 输出 GX↔Go 位置映射 JSON
   gox map-lookup [-to-go] <map.json> <line> <col>        位置反查（默认 Go→GX）
   gox lsp-map <dir-or-file>                              项目符号映射 JSON
@@ -96,7 +100,7 @@ type buildFlags struct {
 }
 
 func parseBuildFlags(args []string) (*buildFlags, error) {
-	f := &buildFlags{module: "github.com/robertpanvip/gox", prefer: "gx"}
+	f := &buildFlags{module: "github.com/robertpanvip/gox-core", prefer: "gx"}
 	if len(args) == 0 {
 		return nil, fmt.Errorf("build: 需要 <file.gx>")
 	}
@@ -188,14 +192,6 @@ func cmdBuild(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := res.Validate(); err != nil {
-		return fmt.Errorf("生成的 Go 代码语法无效: %w", err)
-	}
-	if err := os.WriteFile(f.out, []byte(res.GoSource), 0644); err != nil {
-		return err
-	}
-	fmt.Printf("已生成 %s （%d 字节，%d 条映射）\n", f.out, len(res.GoSource), res.SourceMap.Len())
-
 	// 第十三轮 P2-B：单文件模式此前从不消费 Analysis 诊断，导致同一份 .gx
 	// 「单文件构建通过、项目模式阻断」的结论分叉。与 cmdBuildProject 对齐：
 	// 语义诊断（signal-field-index-unknown / for-not-list / 大小写等）统一打印，
@@ -209,6 +205,22 @@ func cmdBuild(args []string) error {
 			})
 		}
 	}
+	// 编译器闸门已把非法产物抑制（InvalidGo=true、GoSource 清空）：直接报错，
+	// 不再对空产物跑 Validate（会误报 expected 'package' 误导定位）。
+	if res.InvalidGo {
+		if len(gxDiags) > 0 {
+			printGxDiagnostics(gxDiags)
+		}
+		return fmt.Errorf("生成的 Go 代码语法无效: 编译产物已被编译器闸门抑制")
+	}
+	if err := res.Validate(); err != nil {
+		return fmt.Errorf("生成的 Go 代码语法无效: %w", err)
+	}
+	if err := os.WriteFile(f.out, []byte(res.GoSource), 0644); err != nil {
+		return err
+	}
+	fmt.Printf("已生成 %s （%d 字节，%d 条映射）\n", f.out, len(res.GoSource), res.SourceMap.Len())
+
 	if len(gxDiags) > 0 {
 		printGxDiagnostics(gxDiags)
 		return fmt.Errorf("GX 语义检查未通过")
@@ -236,6 +248,9 @@ func cmdBuildProject(f *buildFlags) error {
 	if err != nil {
 		return err
 	}
+	// runtime 包（runtime/scene 等）永远在 gox module 下，与项目 module 无关。
+	// -module 是用户覆盖 runtime module 的入口（如 fork gox），默认已是 gox 官方路径。
+	proj.RuntimeModule = f.module
 	files, err := proj.Build(f.file)
 	if err != nil {
 		return err
@@ -291,7 +306,7 @@ func printGxDiagnostics(diags []gxFileDiagnostic) {
 // gxDiags 是 GX 语义层（大小写等）诊断，已是 GX 坐标，与 go build 诊断一并输出。
 func runCheckProject(srcFiles []buildcheck.SourceFile, smByPath map[string]*sourcemap.SourceMap, gxDiags []gxFileDiagnostic, replaces []string, projectModule, root string) error {
 	checker := buildcheck.New(64)
-	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.3")
+	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.4")
 	checker.SetModulePath(projectModule)
 	for _, r := range replaces {
 		parts := strings.SplitN(r, "=", 2)
@@ -335,7 +350,7 @@ func runCheckProject(srcFiles []buildcheck.SourceFile, smByPath map[string]*sour
 // runCheck 执行真实 go build，并把诊断从 Go 位置经 sourcemap 回投到 .gx。
 func runCheck(goSrc string, sm *sourcemap.SourceMap, replaces []string) error {
 	checker := buildcheck.New(64)
-	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.3")
+	checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.4")
 	for _, r := range replaces {
 		parts := strings.SplitN(r, "=", 2)
 		if len(parts) != 2 {
@@ -425,7 +440,7 @@ func cmdCheck(args []string) error {
 func cmdCheckProject(file, root, prefer string) error {
 	projModule := readProjectModule(root)
 	if projModule == "" {
-		projModule = "github.com/robertpanvip/gox"
+		projModule = "github.com/robertpanvip/gox-core"
 	}
 	p := module.PreferGX
 	if prefer == "go" {
@@ -464,6 +479,93 @@ func cmdCheckProject(file, root, prefer string) error {
 	}
 	printGxDiagnostics(all)
 	return fmt.Errorf("GX 语义检查未通过")
+}
+
+// cmdFmt 格式化 GX 源码。默认打印到 stdout；-w 写回；-check 只检查不改文件。
+// 目录参数会递归收集其中的 .gx 文件。
+func cmdFmt(args []string) error {
+	var write, check bool
+	var paths []string
+	for _, a := range args {
+		switch a {
+		case "-w":
+			write = true
+		case "-check":
+			check = true
+		default:
+			paths = append(paths, a)
+		}
+	}
+	if write && check {
+		return fmt.Errorf("fmt: -w 与 -check 不能同时使用")
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("fmt: 需要 <file.gx> 或 <dir>")
+	}
+
+	var files []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			err = filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !d.IsDir() && strings.HasSuffix(path, ".gx") {
+					files = append(files, path)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if !strings.HasSuffix(p, ".gx") {
+			return fmt.Errorf("fmt: %s 不是 .gx 文件", p)
+		}
+		files = append(files, p)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("fmt: 未找到 .gx 文件")
+	}
+
+	changed := 0
+	for _, f := range files {
+		src, err := readFile(f)
+		if err != nil {
+			return err
+		}
+		out := compiler.Format(src)
+		same := src == out
+		switch {
+		case write:
+			if !same {
+				if err := os.WriteFile(f, []byte(out), 0644); err != nil {
+					return err
+				}
+				fmt.Printf("已格式化 %s\n", f)
+				changed++
+			}
+		case check:
+			if !same {
+				fmt.Printf("需要格式化: %s\n", f)
+				changed++
+			}
+		default:
+			if len(files) > 1 {
+				fmt.Printf("--- %s ---\n", f)
+			}
+			fmt.Print(out)
+		}
+	}
+	if check && changed > 0 {
+		return fmt.Errorf("fmt: %d 个文件需要格式化", changed)
+	}
+	return nil
 }
 
 func cmdStage(stage string, args []string) error {

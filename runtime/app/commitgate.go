@@ -3,7 +3,7 @@ package gxapp
 import (
 	"sync"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // commitGate 是 Host 的串行提交门：把「Scene Mutation」（响应式 effect 改节点）

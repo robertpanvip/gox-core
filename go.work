@@ -1,8 +1,5 @@
-go 1.27
+go 1.27.2
 
 use (
 	.
-	./backend/rust/go
-	./backend/skia
-	./examples/desktop-demo
 )

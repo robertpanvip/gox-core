@@ -23,7 +23,7 @@ func TestIfBlockWhitespaceNoTextNode(t *testing.T) {
 		{
 			name: "if 前后与块内空白",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { ok bool }
 func main() { p:=P{ok:true}; _ = <div><span>x</span> if p.ok { <b>y</b> } tail</div> }
 `, wantBare: false,
@@ -31,7 +31,7 @@ func main() { p:=P{ok:true}; _ = <div><span>x</span> if p.ok { <b>y</b> } tail</
 		{
 			name: "if 块内相邻元素空格",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { ok bool }
 func main() { p:=P{ok:true}; _ = <div>if p.ok { <b>A</b> <i>I</i> }</div> }
 `, wantBare: false,
@@ -39,7 +39,7 @@ func main() { p:=P{ok:true}; _ = <div>if p.ok { <b>A</b> <i>I</i> }</div> }
 		{
 			name: "if 后紧跟闭合标签",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type P struct { ok bool }
 func main() { p:=P{ok:true}; _ = <div>if p.ok { <b>y</b> } </div> }
 `, wantBare: false,
@@ -47,7 +47,7 @@ func main() { p:=P{ok:true}; _ = <div>if p.ok { <b>y</b> } </div> }
 		{
 			name: "有意 inline 空格须保留",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 func main() { _ = <div><b>A</b> <i>B</i></div> }
 `, wantBare: true,
 		},

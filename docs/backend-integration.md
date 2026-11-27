@@ -261,6 +261,351 @@ app.SetChildDiffer(nil) // 恢复 host 内建
 
 > 三样都不触碰命中/布局/绘制：ID 是身份、Changes 是"什么变了"的数据描述、布局缓存归后端自建 map[NodeID]any。决策与实现仍 100% 归后端。
 
+### 2.5 帧缓存与脏矩形（后端可选，Skia 后端已实现）
+
+Host 是变化驱动的（signal→effect→Draw），无变化时不会请求帧。但**一旦 Draw 被调用**，后端是否重算完全由后端决定。Skia 后端（`backend/skia`）提供了一套可复用的帧缓存范式，Rust 后端有同构实现：
+
+**三层递进**（additive，不改 Window 接口、不改 Host 协议）：
+
+1. **整帧复用**：每帧对整棵树拍"内容快照"（`nodeStamp`：type/kind/text/props 稳定签名/子节点 ID 序列），与上一帧完全一致时**画布完全不动**，直接返回上帧的 DrawLog/HitBoxes。`FrameCache.shouldReuse` + `renderCached`。
+   - 无变化帧跳过 Yoga 布局 + 全部 Skia 绘制。基准（30 卡片树）：`~660μs → ~170μs`，约 **4×**。
+2. **布局差分 + 脏矩形**：有变化时仍需全量 Yoga（flex 局部变化会影响兄弟），但对比新旧 `layoutCache` 得出几何变化节点的矩形（旧∪新、阴影/描边外扩、overflow 裁剪区），只清+画这些脏区；`painter.shouldDraw` 跳过与脏区不相交节点的 Skia 调用。脏区 >25% 画布或 >4 块时自动退化全量（避免多遍遍历开销反超）。
+3. **GUI 接入**：真实窗口用 `skia.PaintToCached(cache, canvas, ...)`，cache 跨帧持有；`glWindow` 已有的 `dirty` 标志与 Host 的 Draw 触发语义一致——无新帧时连 render pass 都不必提交（Rust 端同理：`apply_frame` 置 `frame_dirty`，无变化且无动画时复用缓存 buffers/pixmap，仅重放 blit）。
+
+**正确性要点**：
+- 节点原地更新、根指针跨帧稳定（见 `scene.Instance.Update`），故 `*Node` 可作缓存 key；变化节点会改 props/text → 快照签名不等 → 触发重算。
+- handler（func）不计入签名（其求值结果已写回 Props/Text），换绑不触发绘制。
+- transition 动画期间 props 每帧变 → 每帧重绘，不会误命中缓存（Rust 端另有 `Animator::is_active()` 判定）。
+- 观测面：`FrameCache.CacheStats()` 返回复用/重绘帧数。
+
+**Rust 后端对应**：Go 侧 `Present` 在无 Changes 时不再发全量快照（有基线即跳过），Rust 侧 `Renderer` 用 `frame_dirty` 避免无变化帧重建布局与光栅化 pixmap；resize 时置脏强制重算。
+
+**按 node_id 增量复用字形（Rust）**：持续滚动（如 720px/s @ 120Hz = 每帧 6px）是最容易退化的场景——`scroll-top` 每帧变会让整帧复用失效，且全树绘制坐标随滚动偏移改变，脏区覆盖整个视口而退化全量。Rust 后端为每个文本节点按**稳定 `node_id`** 缓存整形结果：
+
+- `emit` 时每个 `TextDraw` 带上 `node.id`。glyphon `Buffer` 只取决于 (文本, 字号)，与坐标/颜色无关——`text_sig(t)` 即此签名。
+- 每帧 `plan_glyphs()` 对比当前 texts 与缓存：ID 在缓存且签名一致 → 直接复用其 buffer；新 ID 或内容/字号变化 → 只 shape 这几项；缓存里当前帧不再出现的 ID（滚出视口）→ 淘汰。绘制位置由每帧 `TextArea.left/top` 提供，故复用 buffer 无需重算位置。
+- 这比"整段签名一致才全复用"精确得多：虚拟列表用 index 作 key、节点 ID 稳定，跨 item 边界时也只 shape 进出的那 1 项，其余全部命中；For 重排、局部内容变化同样只重算受影响项。动画只改坐标/颜色时签名不变可复用，改了字号/文本则签名变化自动重算；resize 清空缓存。
+- 纯逻辑 `plan_glyphs()` 可单测：覆盖复用命中、跨边界只 shape 新增项、内容变化、重排、冷缓存全量等场景。
+
+**为何不做像素级 layer blit（诚实边界）**：Skia 后端受 go-skia v0.1.0 绑定限制——无离屏 raster surface、Bitmap 未导出像素分配、画布不可读，无法实现；Rust 后端虽有完整 tiny-skia `Pixmap`，但文本走 glyphon 独立管线（按屏幕坐标逐帧 shape，非可平移位图），把文本塞进离屏位图需绕开 glyphon、牺牲 CJK/字体质量。因此选择"复用已算结果、只重算变化项"而非"搬运像素"：收益来自省掉字形整形与布局之外的重复工作，不牺牲渲染质量。
+
+### 2.6 不定高虚拟列表与苹果风格滚动条
+
+**不定高列表（组件层 `widgets/virtualList.go`）**：原实现假设所有 item 等高（`scrollTop / itemHeight` 直接算索引）。新增可选 `height(i)` 回调 + `estimate-height`：
+
+- 内部维护前缀和 `offsets[i] = 前 i 项累计高度`，用二分查找把 `scrollTop` 映射到 item 索引；spacer 高度 = 可见首项之前的累计高度 `offsets[first]`。
+- `scrollTop` 与 `height(i)` 依赖的数据每次求值时重算 offsets（O(n)，count 通常几千可忽略），保证数据变化即时生效。
+- 未提供 `height` 时完全退回原等高路径，零开销、向后兼容（Table 等现有调用方不受影响）。
+- **两种高度来源**：传 `height(i)` 走显式模式（精确、零回流）；不传则启用**自动测量**——由后端把每项真实高度回流，调用方无需预知内容高度（多行文本/图片）。
+
+**布局回流协议（Backend → Host → Component，additive）**：自动测量的数据通道。
+
+- 类型 `gxscene.Measured{ID, W, H}` + 总线（`runtime/scene/measure.go`）：后端布局后 `PublishMeasured([]Measured)`，组件按 `NodeID` `SubscribeMeasured`。0.5px 内去重，尺寸稳定后自然停——这是防环收敛条件。
+- **Skia**（`backend/skia`）：`renderCached` 从 `layoutCache` 导出 `(node.ID, W, H)`，`Window.Draw` 在释放 canvas 锁后投递（回调会写 signal 触发重绘，锁内会自锁）；`PaintTo`/`PaintToCached` 同步投递。
+- **Rust**（`backend/rust`）：`emit()` 按 Taffy 结果收集 `(node.id, w, h)` 到 `DisplayList.measured`，`render()` 后经 `eventCb` 以 `kind="measured"`、`text=[[id,w,h],...]` 回传；Go 侧 `goEventBridge` 识别该 kind，直接 `PublishMeasured`（走 UIExecutor 投递，不重入 Draw）。
+- **虚拟列表消费**：`render(index)` 里订阅该项根节点 ID（For 的 per-item Owner 下 `signal.OnCleanup` 负责滚出窗口时退订）；实测高度写入 `measured[index]` → offsets 重算 → 版本 signal 驱动窗口重绘。
+
+**锚定补偿（对齐 `virtua/src/core/store.ts` 的 `ACTION_ITEM_RESIZE`）**：
+
+```
+anchor := 当前视口顶部项;  oldOff := offsets[anchor]
+measured[index] = 真实高度   // → offsets 重算
+jump += offsets[anchor] - oldOff   // 视口上方项变高 → 补偿，视觉不动
+```
+
+- 只有落在锚点之前的项变高才改变 `offsets[anchor]`，offset 差天然表达了 virtua 的 `shouldKeep` 判定。
+- `jump` 经可选 `on-scroll: func(float64)` 写回外部 `scrollTop` 并清零（等价于 virtua 的 `_flushJump`），避免回顶时残留偏移；未提供时退化为内部累积，回顶可能有少量偏差（已知边界）。
+- `resetMeasurements` 仅测试用；生产环境由各订阅者退订逐项清理。
+
+**苹果风格滚动条（Rust 后端）**：`overflow: scroll/auto` 容器在内容高度超过视口时显示 overlay 滚动条：
+
+- `emit` 递归返回子树内容底边，由此算出容器内容总高度；生成滚动条几何（纯函数 `scrollbar_geometry()`，可单测）。
+- macOS 视觉：细（8px）、圆头、半透明胶囊 thumb，贴在容器右内侧，不占布局；thumb 高 = `容器高² / 内容高`（最小 32px），位置随 `scrollTop / maxScroll` 联动。
+- 关键修复：`overflow` 容器的直接子项设 `flex-shrink: 0`——否则 Taffy 默认会把子项压缩进视口、内容永不溢出，滚动与滚动条都失效。这是滚动容器的标准语义。
+- **淡出边界（诚实）**：滚动时 thumb 淡入；滚停约 1.2s 后开始淡出。但当前帧缓存在"无新帧"时跳过 Pixmap 重绘，纯静止状态下淡出无法自行推进，会停在最后的 alpha——需要仍在重绘的帧（如动画）推进。要做到系统级自动淡出，需允许滚动条层独立逐帧重绘，属于后续优化，不牺牲当前帧缓存收益。
+
+### 2.7 受限样式表与伪状态样式（`&:hover` / `&:focus` / `&:active` / `&:disabled`）
+
+样式从「任意字符串 props」收敛为**受限 CSS sheet**：`gxscene.Style` 是一个**字段固定的
+强类型 struct**，字段即白名单属性，标量统一为 `StyleValue`（string 别名），伪状态是
+`Hover`/`Active`/`Focus`/`Disabled *Style` 字段。字段名拼错在 Go 编译期即报错。
+
+**写法**（Go、GX、JSON 三种等价）：
+
+```go
+// Go：固定字段；伪状态是 *Style 命名字段
+gxscene.Style{
+    Bg: "#3b82f6", Color: "#fff", Padding: "11",
+    Hover:  &gxscene.Style{Bg: "#2563eb"},
+    Active: &gxscene.Style{Bg: "#1d4ed8", Transform: "scale(.98)"},
+}
+```
+```jsx
+// GX：驼峰 key + 伪状态单词 key → 编译为 gxscene.Style{...} 结构体字面量
+<div style={{bg:"#fff", hover:{bg:"#eee"}}}>x</div>
+```
+带引号 key 的 JSON 对象字面量同样映射到强类型字段，伪状态也用单词 key
+（`style={{"bg":"#fff","hover":{"bg":"#eee"}}}`）；`style` 也能直接接 JSON 字符串。
+伪状态一律用单词 key（`hover`/`active`/`focus`/`disabled`），源码和 JSON 字符串里写
+`&:hover` 都会报 `style-unknown-prop`/解析失败——不做 `&:` 前缀转译；后端 props 里的
+`&:hover` 由 `Style.Props()` 生成，与源码写法无关。
+
+四种伪状态均已接入：**`&:hover` / `&:focus` / `&:active` / `&:disabled`**。
+
+**展平契约（host）**：`style` 属性写入 `Node.Props` 时由 `Instance.writeAttr` 展平：
+
+- 普通属性 → 直出为同名 props；
+- 伪状态子表 → 编码成 `props["&:hover"] = ` `{"bg":"#eee"}`（JSON 串，key 统一为 `&:`）；
+- `style` key 本身不进 Props。
+
+增量更新时，上次写入但本次消失的 key 写空串（后端无属性删除语义，空串使旧值失效）。
+伪状态输入统一用单词 key（`hover`/`active`/`focus`/`disabled`），由 `Props()` 编码成唯一的
+`&:xxx` 后端协议形式；源码或 JSON 里写 `&:`/`$:` 前缀会被拒绝，后端只见到一种形式。
+
+**覆盖优先级**：`hover → focus → active → disabled`，后者覆盖前者同名属性。
+`disabled` 由节点自身属性 `props["disabled"]`（bool 或字符串 `"true"`/`"1"`）驱动，
+优先级最高，会盖过任何交互态——禁用元素即便被悬停/聚焦也呈现禁用样式。
+
+**状态检测（框架自动，零业务侵入）**：
+
+- **Rust（完整链路）**：`Renderer` 持有 `hovered_id`/`active_id`/`focused_id`。
+  `CursorMoved` 用 `hit_node_id()`（复用 click 的命中规则：浮层优先/最小面积/裁剪）做
+  enter/leave 边沿检测；`MouseInput` 按下设 active、抬起清除，`CursorLeft` 清 hover；
+  点击命中输入框（`gx-input-id`）设 focused、点击其他区域清 focused（同浏览器语义）。
+  状态变化才 `request_redraw`。渲染前 `style::apply_pseudo_state()` 把命中节点的伪状态
+  子表覆盖进临时树副本（与 `Animator::apply` 同构，不改常驻镜像树）；`disabled` 读节点
+  自身属性、无需外部状态载体。视觉焦点与 host 侧 Input 的 `focusToken` signal 互补：
+  后者驱动 IME/光标，点击场景下两者指向同一节点。
+- **Skia（headless 验证后端）**：无真实鼠标/焦点事件；`parseStyleWithState(props, state)`
+  在解析前按显式 `state`（`hover`/`focus`/`active`）覆盖子表，并始终检查节点 `disabled`
+  属性叠加 `&:disabled`，供测试/特殊宿主验证。无状态时 `&:` key 被安全忽略。
+
+**边界**：伪状态只作用于节点自身（`&` 语义），不支持后代选择器、不嵌套子伪状态；
+`focus` 的视觉状态由点击事件驱动（键盘 Tab 导航焦点尚未接入）；覆盖发生在布局前，
+改尺寸类属性（width/padding 等）会触发重排。
+
+### 2.8 Video 组件与视频解码
+
+`widgets.Video` 与 `Img` 同构：产出一个 `Kind="video"` 的普通 NodeDiv（参与布局/
+定位/裁剪/伪状态），所有播放属性走 Props 原生透传。**src 由后端内部读取并解码**——
+不引入重量级解码库，也不把播放甩给外部宿主组件。
+
+**解码策略（性能优先、零新增编译依赖）**：
+
+- 后端 spawn 一个 ffmpeg **子进程**把 `src` 解码成 RGBA 原始帧（`stdout` 流式输出），
+  在独立线程按帧读取；UI 线程只做「取当前帧 → 贴纹理」，不参与解码。
+- 双缓冲：解码线程整帧写入 front buffer，绘制读 front，无撕裂；新帧到达只请求重绘，
+  **不触发布局重算**（复用现有帧缓存/DisplayList 增量管线）。
+- 暂停：只切「丢弃帧」标志，不杀进程；`playback-id`/`seek-to`/`src` 变化才重建解码进程。
+- 两后端统一协议 `runtime/video`（Props 键、事件 Kind、Meta JSON 载荷），各自实现解码：
+  Skia 用 `os/exec` + `image`，Rust 用 `std::process::Command` + `tiny-skia::Pixmap`。
+  与 img/canvas 的「两后端各自用原生能力实现同一协议」分层一致。
+
+**为什么不用 `ffmpeg-next` crate**：其链接依赖 `libav*.pc` + 头文件（本机缺失，apt 源
+无 dev 包），build feature 要走 GitHub clone FFmpeg 源码（502 且耗时），且会让 Rust
+静态库动态依赖一堆 `.so`、与 cgo 分发/跨平台冲突。子进程方案零编译依赖、零静态库膨胀。
+
+**部署（重要）**：ffmpeg **不是任何主流系统的预装组件**（Windows/macOS 从不预装，
+Linux 桌面多数不装 CLI）。后端按 `FFMPEG_PATH` → `PATH` 探测：
+
+- 探测到 → 正常解码播放；
+- 探测不到 → 画 `poster` 占位 + 回传 `videostate=error` 事件，**绝不崩溃**。
+
+应用需随包分发一个 ffmpeg（注意 LGPL/GPL 合规），或用 `FFMPEG_PATH` 指定路径。
+音频默认不解码（`-an`），`muted=false` 目前也不出声——当前版本专注画面播放。
+
+**API**：
+
+```go
+widgets.Video(gxscene.Props{
+    "src": "clip.mp4", "poster": "cover.png", "width": "640", "height": "360",
+    "object-fit": "contain", "autoplay": true, "loop": true,
+    "playing": playingSignal,        // bool / func() bool，驱动暂停/恢复
+    "playback-id": session, "seek-to": seekSec,
+})
+```
+
+后端 → host 事件（经现有事件通道，node_id=video 节点）：`videostate`
+（playing/paused/ended/error）、`videometa`（`{"duration":s,"w":px,"h":px}`）、
+`videotime`（当前秒，250ms 节流）。上层据此用普通 Button/Slider 组装控制条。
+
+**边界**：无 ffmpeg 时降级为 poster；音频未接入；seek 通过重启解码进程实现（毫秒级）；
+时间戳按 30fps 近似（未走 ffmpeg PTS 通道）；暂停期间仍抽帧但丢弃（不省解码 CPU）。
+
+### 2.9 Icon 矢量图标组件（`runtime/icon` + `widgets.Icon`）
+
+**目标**：预置苹果 SF Symbols 风格的矢量图标，并支持读取任意 SVG 渲染为矢量，
+**全程不栅格化为位图**——放大不失真、零后端改动、零新增依赖。
+
+**架构（host 统一解析 → 各后端矢量绘制）**：
+
+> `widgets.Icon` → `runtime/icon`（纯标准库解析 SVG）→ `Props["canvas-ops"]`
+> → 各后端已有的 canvas 矢量 path 管线。
+
+选这条路的理由：canvas 原语的三个后端本就用矢量 path API 绘制（Skia `DrawPath`、
+Rust `tiny-skia::fill_path/stroke_path`、Web `CanvasRenderingContext2D.bezierCurveTo`），
+host 只要把 SVG 规范化成 `canvas.Op`，三端天然一致、零后端改动。
+图标 path 输出的绝对 M/L/C/Z 格式与三端解析器（含 Web `dom_js.go` 的 `applyPath`）兼容。
+
+曾评估在 Rust 端接入 `usvg`/`resvg`（性能最好的 Rust SVG
+库，且 tiny-skia 版本 0.11.4 与本项目完全兼容、实测可直接把解析出的 Path 喂给绘制管线），
+但它是 Rust-only，会破坏多后端一致性并显著增大静态库（fontdb/image 依赖），故不在
+解析层接入——host 层纯 Go 解析对图标规模足够快，且保持主模块零依赖。
+
+**解析层（`runtime/icon`，纯标准库）**：
+- `Parse` 解析 `<svg>` 及 `<path>/<circle>/<ellipse>/<rect>/<line>/<polygon>/<polyline>/<g>`
+  （含样式继承），应用 viewBox 等比缩放（默认 xMidYMid meet）并把变换**烘焙进绝对坐标**，
+  后端直接绘制无需再做坐标变换；
+- SVG path 完整命令集 M/L/H/V/C/Q/A/Z（含相对坐标、隐式重复参数、S/T 平滑曲线、
+  科学计数法），规范化成后端支持的绝对 M/L/C/Z：H/V→L、Q→C、A→C（端点参数化）、
+  S/T 展开为 C；
+- `currentColor` 由组件注入的 `color` 替换；`Resolve` 支持内置名/别名、原始 SVG、
+  `data:image/svg+xml` URI、`.svg` 文件、http(s) URL。
+
+**内置图标**：`runtime/icon.Builtin` 预置 85 个苹果风格 24×24 图标（house/search/
+heart/star/bell/gear/play/grid/list/eye/eye-off/refresh/filter/send/wifi/bolt/cart/chart/
+zoom-in/text-field/checkbox/radio/toggle/sidebar/pencil/… 共 12 组），`Aliases` 提供
+约 80 个常见别名（home→house、user→person、reload→refresh、hidden→eye-off、file→doc、
+switch→toggle 等），`Names()` 列出全部。
+
+**用法**：
+```go
+widgets.Icon(gxscene.Props{"name": "house", "size": 24, "tone": "primary"})
+widgets.Icon(gxscene.Props{"name": "heart", "size": 20, "color": "#ff453a"})
+widgets.Icon(gxscene.Props{"src": "<svg viewBox='0 0 24 24'>...</svg>", "size": 28})
+```
+props：`name`（内置名/别名）、`src`（外部 SVG）、`size`（默认 20）、`color`、
+`tone`（语义色，默认 primary）、`stroke-width`（默认 1.8，随 size 缩放）。
+`name` 优先于 `src`；都无效时降级为空图标（不崩溃）。
+
+**具名图标组件集（`widgets/iconSet.gx`）**：把内置 SVG 用 GX 语言预制为强类型组件。
+每个图标 = 一个 SVG 源码常量 + 一个 `IconXxx` 具名组件，SVG 数据随组件库源码交付，
+不依赖运行时字符串表；底层统一复用 `iconFromSVG`（与通用 `Icon` 同一解析/构建链路）。
+`size/color/tone/stroke-width` 仍由调用方 props 决定，因此具名组件同样支持换色与缩放。
+
+```go
+// Go 调用
+widgets.IconHouse(gxscene.Props{"size": 24, "tone": "blue"})
+widgets.IconHeart(gxscene.Props{"size": 20, "color": "#ff453a"})
+```
+```jsx
+// GX JSX（与其它标准库组件用法一致，编成 OpComp + Props 插槽）
+<div>
+  <IconHouse size="24" tone="blue"/>
+  <IconSearch size="20" color="#fff"/>
+</div>
+```
+
+- **覆盖**：85 个规范名具名组件 + 3 个高频别名（`IconHome`/`IconUser`/`IconSettings`，
+  复用规范图标 SVG）。分 12 组：导航/操作/媒体/对象/状态/视图/可见性/更多操作/通信/
+  设备与状态/对象与数据/表单与编辑，含 `IconHouse`/`IconChevronRight`/`IconPlay`/
+  `IconHeart`/`IconGrid`/`IconList`/`IconEye`/`IconEyeOff`/`IconRefresh`/`IconFilter`/
+  `IconSend`/`IconWifi`/`IconBolt`/`IconCart`/`IconChart`/`IconZoomIn`/`IconTextField`/
+  `IconCheckbox`/`IconRadio`/`IconToggle`/`IconSidebar`/`IconPencil` 等。全部经
+  `make gxbuild` 从 `.gx` 转译为 `.go`，幂等。穷举测试保证每个组件都产出非空矢量指令。
+- **一致性**：测试逐字节校验组件库 SVG 常量与 `runtime/icon.Builtin` 相同，防止两套
+  数据漂移；别名组件与规范名产出完全相同的矢量指令。
+- 新增图标时在 `runtime/icon/builtin.go` 与 `widgets/iconSet.gx` 同时登记即可。
+
+**边界**：仅静态矢量图元（无 SVG 滤镜/渐变/文本/外部 image 引用）；fill-rule 固定
+Winding（内置图标用描边或单轮廓实心规避镂空方向问题）；动画图标需用 signal 重建
+canvas-ops。
+
+### 2.10 Rust 后端的帧传输、生命周期与事件驱动（工程评审整改）
+
+针对 Rust 后端的多轮工程评审，以下四项在 `backend/rust` 落地（这也适用于任何
+走 cgo/Wire 的独立后端，作为实现范式）：
+
+1. **帧 FIFO 队列，杜绝增量丢失**（P0）：旧实现 `Arc<Mutex<Option<Vec<u8>>>>` 是单槽，
+   连续多个增量帧在事件循环消费前会被覆盖，导致镜像缺修改。现改为
+   `FrameQueue.pending: VecDeque<Vec<u8>>`——`gx_window_draw` 逐帧入队，redraw 时 drain
+   全部按序 `apply_frame`；队列版本由 Go 侧 `Frame.Version` 连续性检查 + draw 失败回退
+   全量快照兜底。
+2. **生命周期：退出请求 + 非阻塞泵，消除 use-after-free**（P0 / P4 目标态重写）：
+   `gx_window_close` 只设置 shutdown 并经 `EventLoopProxy<GxEvent>` 发退出请求，
+   **不释放内存**；事件循环在 `gx_window_new` 创建、由 `gx_window_pump` 在 Host 主循环
+   goroutine 上逐轮非阻塞泵（winit `pump_events` 嵌入 API，timeout=ZERO），返回
+   0=已退出 / 1=继续 / 2=内部错误；pump 观测到 Exit 即清空渲染器槽。
+   新增 `gx_window_destroy` 由 Go 在 pump 退出后释放调用方那份 Arc（Rust 侧兜底清空
+   app/el/renderer）。Go `Window` 实现 `gxapp.HostedWindow`：`Poll` 泵一轮 + 消费
+   事件通道，`ShouldClose` 读 Exit 标志，`Run` 退化为 no-op——窗口由 Host 主循环
+   轮询驱动（不再有自驱 `gx_window_run` 阻塞循环）。
+3. **事件驱动重绘，停止空转**（P1）：去掉 `RedrawRequested` 结尾的无条件
+   `request_redraw`。新帧到达时 `gx_window_draw` 经 proxy 发合并式 `Wake` 请求一次重绘；
+   仅当 `Renderer::needs_continuous_redraw()` 为真（transition 动画 / 播放中的视频 /
+   滚动条淡入淡出过渡）才继续调度下一帧。`EventLoopProxy` 是这套机制的关键——否则
+   新帧提交后无人唤醒事件循环。
+4. **事件分级可靠性**（P1）：Rust→Go 事件回调的通道满时不再一律丢弃。`inputEvent.reliable()`
+   把 IME 提交/预编辑、键盘、点击、焦点等归为可靠事件——通道满时进 mutex 保护的
+   `overflow` 无界队列（不丢、有序），`pump` 信号唤醒 Run 去 drain；光标/hover 等高频
+   状态事件用 `mergeSlot` 只保留最新。全程非阻塞，不卡 Rust 事件线程。
+5. **VSyncControl（P4.5 高刷专项）**：`gx_window_set_vsync(handle, mode)` 运行时切换
+   present 模式（0=Fifo 默认帧节奏对齐屏幕刷新率 / 1=Mailbox 低延迟三缓冲 / 2=Immediate
+   关 vsync 压测用），渲染器已创建则立即 reconfigure、未创建则首窗 resumed 应用；
+   surface 不支持该模式返回 1（保持原值，如 llvmpipe 仅支持 Fifo），创建期缓存
+   `get_capabilities().present_modes` 作为判据；`gx_window_get_vsync` 读回模式码。
+   Go 侧 `Capabilities().VSyncControl=true`，`rb.Window.SetVSync/VSync`。实测工具：
+   `examples/fpsbench`（RAF 连帧 + 帧时间直方图 + V 键切模式 + GX_AUTOCLOSE_MS 关窗汇总）。
+6. **MousePassthrough（P4 遗留补齐）**：`gx_window_set_mouse_passthrough(handle, enabled)`
+   整窗级穿透开关——true 时窗口不接收任何鼠标事件，点击落到下层窗口（overlay 场景）。
+   X11 经 dlopen libXext 调 `XShapeCombineRectangles(ShapeInput)`（空输入形状=穿透，
+   不引入链接期依赖；winit XConnection 已调 XInitThreads，跨线程安全），Windows 走
+   `WS_EX_TRANSPARENT|WS_EX_LAYERED` 扩展样式，macOS 走 `setIgnoresMouseEvents`；
+   Wayland 无等价 API 返回 rc=2（Go 侧透传错误，不静默）。窗口未创建时只缓存请求，
+   首窗 resumed 自动应用（与 gx_window_set_vsync 创建期语义一致）。Go 侧
+   `Capabilities().MousePassthrough=true`，`rb.Window.SetMousePassthrough(bool)`。
+   **区域级精确穿透已落地**：`rb.Window.SetMousePassthroughMode(mode)`
+   （`PassthroughOff/PassthroughWhole/PassthroughRegion`）——区域级从本帧
+   DisplayList 提取「有内容」矩形（不透明 bg/渐变/图片/canvas/video/边框 +
+   可交互命中框，裁剪到窗口物理边界），随帧自动更新 XShape（内容矩形变更时
+   才调，缓存在渲染器）；根节点不透明时区域级自然退化为整窗形状。区域级仅
+   X11 支持（Win/macOS 无区域级公开 API，返回错误需回退整窗级）。诊断：
+   `GX_PT_DEBUG=1` 打印每帧矩形集合。坑：**`build.sh` 重建静态库后 cgo 包
+   不会自动重链（Go 构建缓存不感知外部 .a 变更），验证需 `go build -a` 或
+   `go clean -cache` 强制重链**。
+
+此外：**Wire 版本协商**（P2）——`Open` 时解析 `gx_window_version()` 的 major，与
+`expectedProtocolMajor` 不一致直接拒绝启动，防止 core 更新协议而用户仍用旧后端；
+**注册表注销**（P1）——`Window.regKey` 在 Close 时 `delete(windows, key)`，不再泄漏；
+**App.Close 错误传递**（P2）——底层 `win.Close()` 错误保存到 `closeErr` 并返回，
+`sync.Once` 保证并发重复调用结果一致。Rust Adapter 的 `go.mod` 去除对 Skia 后端的
+冗余依赖，可独立成仓。
+
+### 2.11 单线程 Runtime 边界与生命周期隔离（本轮评审整改）
+
+本轮针对「单线程 UI Runtime 是否真正闭环」的评审，落地以下整改（Host 侧位于
+`runtime/signal`、`runtime/app`；后端侧位于 `backend/rust/rust`）：
+
+1. **任务投递绑定到 App，不再全局**（P0）：`signal.Runtime` 封装投递器与关闭状态；
+   每个 `App` 持有独立实例，`app.SetUIExecutor` 注入本 App 的投递器，`app.Dispatch(fn)`
+   是后台更新的推荐入口。旧的全局 `signal.Safe` 降级为默认 Runtime 的兼容语法糖
+   （单 App 场景）。因此 app1.Close 不再误伤 app2 的后台更新，多个 App 也不会互相
+   覆盖投递器。依赖追踪核心（observers / ownerStack / batch）仍是单线程唯一的，
+   多个 App 应共享同一个 UI 事件循环（评审亦认可共享事件循环的模型）；Runtime 的
+   实例隔离解决的是「投递器覆盖 / 关闭误伤」，不是让响应式核心支持多线程并发。
+2. **禁止 Safe 静默同步降级**（P0）：未注入 UI Runtime 时 `Dispatch`/`Safe` 返回
+   `ErrUIRuntimeNotInitialized` 且闭包不执行；headless / 测试必须显式选用
+   `signal.NewSyncRuntime()` 或 `signal.SetUIPost(signal.SyncPoster)`。已关闭返回
+   `ErrUIRuntimeClosed`，投递器拒绝返回 `ErrUITaskRejected`——拒绝原因一律可观测。
+3. **Cleanup panic 不污染观察者栈**（P0）：`withObserver` 先注册 defer 恢复栈，再执行
+   用户 Cleanup；Owner 栈由 `runWithOwner` 的 defer 独立恢复。panic 原样向上传播，
+   剩余 Cleanup 跳过，但运行时内部状态全部复位。
+4. **Batch 去重与 panic 语义**（P1）：epoch 在每个 Batch 入口只递增一次，Effect 按
+   batchMark 去重，避免每次写入重扫 pending 列表；Batch 内 panic 时已写入的值保留、
+   已收集的 Effect 仍冲刷，随后 panic 传播。
+5. **Computed 异常语义**（P1）：移除无效的 `panicked` 标志；Computed 内 panic 原样
+   传播，不吞用户异常；`computing` / `observers` / `ownerStack` / `running` 由各层
+   defer 复位，dirty 保持 true，下次读取正常重算。
+6. **Owner 线程契约**（P1）：明确 Owner 创建 / Dispose / Cleanup / Mount 必须在 UI
+   Runtime 线程；保留 mutex 作为防御与并发控制点需要，不承诺跨线程并发 Dispose。
+7. **Rust 帧队列过载可观测**（P1）：新增 `MAX_PENDING_FRAMES`（默认 120）阈值与
+   `submitted / applied / peak_pending / overload_events / max_latency_ms` 指标，经
+   `gx_window_frame_stats(handle, out[5])` 导出。过载只计数**不丢帧**（增量帧丢弃会
+   永久失步），由 Host 的 FullSync 机制在适当时机合并完整状态。
+8. **失败恢复 / 多 App 生命周期测试**：新增 Frame 成功→失败→FullSync→增量、Close
+   与失败恢复并发不重复提交、两个 App 关闭互不影响、关闭中持续投递不触碰已销毁
+   Scene、Cleanup panic 后依赖追踪仍正常等回归测试。
+
 ## 3. 拆成两个项目如何跑通
 
 假设后端项目为 `github.com/yourorg/gox-desktop`，module 独立。
@@ -271,12 +616,12 @@ app.SetChildDiffer(nil) // 恢复 host 内建
 
 ```
 require (
-    github.com/robertpanvip/gox vX.Y.Z
+    github.com/robertpanvip/gox-core vX.Y.Z
     github.com/yourorg/gox-desktop vA.B.C
 )
 ```
 
-本地联调用 `replace` 或 `go.work` 指向两仓库本地路径。编译器注入的 import 路径来自 `-module` 参数（默认 `github.com/robertpanvip/gox`），生成的 Go 只依赖 host runtime，不含后端路径——后端由业务代码自己 import。
+本地联调用 `replace` 或 `go.work` 指向两仓库本地路径。编译器注入的 import 路径来自 `-module` 参数（默认 `github.com/robertpanvip/gox-core`），生成的 Go 只依赖 host runtime，不含后端路径——后端由业务代码自己 import。
 
 > 环境前提：所有参与方都需要 **Go 1.27+**（泛型方法）。
 
@@ -286,8 +631,8 @@ require (
 package desktop
 
 import (
-    gxapp "github.com/robertpanvip/gox/runtime/app"
-    gxscene "github.com/robertpanvip/gox/runtime/scene"
+    gxapp "github.com/robertpanvip/gox-core/runtime/app"
+    gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 type skiaWindow struct{ /* 平台句柄 */ }
@@ -306,7 +651,7 @@ func (w *skiaWindow) Config() gxapp.WindowConfig        { return gxapp.WindowCon
 源码按 GX 约定写（外部符号小写，编译器还原大写）：
 
 ```gx
-import gxapp "github.com/robertpanvip/gox/runtime/app"
+import gxapp "github.com/robertpanvip/gox-core/runtime/app"
 import desktop "github.com/yourorg/gox-desktop"
 
 app, err := gxapp.openWith({ title: "Demo", width: 800 }, desktop.newWindow())

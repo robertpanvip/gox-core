@@ -9,12 +9,12 @@ func TestSignalDeclDesugar(t *testing.T) {
 	// sig name = expr → var name = Signal.New(expr)，并注入 import
 	src := `package main
 sig count = 0
-func main() { println(count()) }
+func main() { println(count) }
 `
 	got := compileOK(t, "sig1.gx", src)
 	containsAll(t, got,
 		`Signal.New(0)`,
-		`import Signal "github.com/robertpanvip/gox/runtime/signal"`,
+		`import Signal "github.com/robertpanvip/gox-core/runtime/signal"`,
 	)
 }
 
@@ -84,7 +84,7 @@ func main() {
     var b Box = Box{count: 1}
     println(b.count)
     println(use(2))
-    println(count())
+    println(count)
 }
 `
 	got := compileOK(t, "sig6.gx", src)
@@ -154,9 +154,9 @@ func main() {
 func TestSignalImportReuseAlias(t *testing.T) {
 	// 源码已用别名导入 sig 路径 → 生成代码复用该别名
 	src := `package main
-import S "github.com/robertpanvip/gox/runtime/signal"
+import S "github.com/robertpanvip/gox-core/runtime/signal"
 sig count = 0
-func main() { println(count()) }
+func main() { println(count) }
 `
 	got := compileOK(t, "sig8.gx", src)
 	containsAll(t, got, `S.New(0)`)
@@ -191,7 +191,7 @@ func main() {
 	sig c = 2
 	b = c
 	c += a
-	println(b(), c())
+	println(b, c)
 }
 `
 	got := compileOK(t, "sigrhs.gx", src)
@@ -237,7 +237,7 @@ func TestSignalNameShadowedByParam(t *testing.T) {
 	src := `package main
 sig count = 0
 func getCount(count int) int { return count + 1 }
-func main() { println(getCount(1), count()) }
+func main() { println(getCount(1), count) }
 `
 	got := compileOK(t, "sigshadowparam.gx", src)
 	if strings.Contains(got, "return count()") {
@@ -252,7 +252,7 @@ func TestSignalNameShadowedByLocal(t *testing.T) {
 	src := `package main
 sig count = 0
 func test() { count := 100; println(count) }
-func main() { test(); println(count()) }
+func main() { test(); println(count) }
 `
 	got := compileOK(t, "sigshadowlocal.gx", src)
 	if strings.Contains(got, "count := 100; println(count())") {
@@ -402,7 +402,7 @@ func main() {
 `
 	got := compileOK(t, "sigalias.gx", src)
 	containsAll(t, got,
-		`import Signal "github.com/robertpanvip/gox/runtime/signal"`,
+		`import Signal "github.com/robertpanvip/gox-core/runtime/signal"`,
 		`c := Signal.Computed(func() string {return s()})`,
 	)
 	if strings.Contains(got, "Signal2") {
@@ -480,6 +480,186 @@ func main() {
 		`name: src`, // 透传档：裸 getter，不二次包装
 		`age: 3`,
 		`Signal.Computed(func() string {return src()})`, // 小写派生还原
-		`import Signal "github.com/robertpanvip/gox/runtime/signal"`,
+		`import Signal "github.com/robertpanvip/gox-core/runtime/signal"`,
 	)
+}
+
+// 回归：signal 包「类型名」出现在类型位置（函数参数/返回值/字段/断言）时，
+// checkNoRawSignalAPI 不得误判为底层构造器。Context[T] 等泛型组件需要在
+// 签名里写 `Signal.Signal[T]`。修复前该写法会被误拦，逼得组件只能用小写别名。
+func TestNoRawSignalAPITypeNamesAllowed(t *testing.T) {
+	cases := []struct {
+		name, src string
+	}{
+		{"param-generic", "package main\nimport Signal \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f(s Signal.Signal[int]) int { return s() }"},
+		// 构造器不可手写（含 import 后的别名路径），函数体用 nil 返回——
+		// 本用例的目的只是验证返回类型位置的 Signal.Signal[T] 放行。
+		{"return-generic", "package main\nimport Signal \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f() Signal.Signal[int] { return nil }"},
+		{"param-plain-alias", "package main\nimport \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f(s Signal.Signal[int]) int { return s() }"},
+		{"owner-type", "package main\nimport Signal \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f(o Signal.Owner) {}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := compileOK(t, "typename.gx", c.src)
+			if !strings.Contains(got, "Signal.Signal[") && !strings.Contains(got, "Signal.Owner") {
+				t.Errorf("类型引用应保留:\n%s", got)
+			}
+		})
+	}
+}
+
+// 回归：白名单类型名若被当作函数调用（后跟 '('）仍须拦截，不能因白名单放行
+// 而给底层构造器开后门。
+func TestNoRawSignalAPIWhitelistTypeCallStillForbidden(t *testing.T) {
+	_, err := Compile("typecall.gx", "package main\nimport \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f() { Signal.Computation(0) }")
+	if err == nil {
+		t.Fatal("Signal.Computation(...) 作调用应被禁止")
+	}
+	if !strings.Contains(err.Error(), "不允许直接调用底层 API Signal.Computation") {
+		t.Errorf("错误信息应点名 Signal.Computation，got: %v", err)
+	}
+}
+
+// 回归：sig 字段一律按普通字段读写，禁止函数式读写。函数式读 s.x() 与
+// 函数式写 s.x(2) 都必须拦截；裸读 s.x、赋值写 s.x = 2、复合赋值 s.x += 2
+// 放行。此前检查器只覆盖 sig 变量，sig 字段的 () 写法会侥幸通过。
+func TestNoExplicitSigFieldCall(t *testing.T) {
+	forbidden := []struct{ name, expr string }{
+		{"函数式读", "_ = s.x()"},
+		{"函数式写", "s.x(2)"},
+		{"函数式写-bool", "s.x(true)"},
+	}
+	for _, tc := range forbidden {
+		t.Run("forbid_"+tc.name, func(t *testing.T) {
+			src := "package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; " + tc.expr + " }"
+			_, err := Compile("sigfield.gx", src)
+			if err == nil || !strings.Contains(err.Error(), "sig 字段") {
+				t.Errorf("函数式 %s 应被拦截，got: %v", tc.expr, err)
+			}
+		})
+	}
+	allowed := []struct{ name, expr string }{
+		{"裸读", "_ = s.x"},
+		{"赋值写", "s.x = 2"},
+		{"复合赋值", "s.x += 2"},
+	}
+	for _, tc := range allowed {
+		t.Run("allow_"+tc.name, func(t *testing.T) {
+			src := "package main\ntype S struct{ sig x int }\nfunc main(){ s := S{x:1}; " + tc.expr + "; _ = s }"
+			got := compileOK(t, "sigfield.gx", src)
+			if !strings.Contains(got, "x Signal.Signal[int]") {
+				t.Errorf("sig 字段应降级:\n%s", got)
+			}
+		})
+	}
+}
+
+// 回归：链式 selector 上的 sig 字段同样禁止函数式读写。此前检查器只从 '.'
+// 左边紧邻 token 判定，链式 s.inner.x() 时那是字段名（推不出类型）而漏放。
+// 现复用 resolveSignalChainEx 从链首沿链传播类型，覆盖多级链、索引链、
+// 调用结果链；中间 sig 段显式写括号（s.leaf().v）亦拦截。
+func TestNoExplicitSigFieldChainCall(t *testing.T) {
+	forbidden := []struct{ name, src string }{
+		{
+			"多级链函数式读",
+			"package main\ntype Inner struct{ sig x int }\ntype S struct{ inner Inner }\nfunc main(){ s := S{}; _ = s.inner.x() }",
+		},
+		{
+			"多级链函数式写",
+			"package main\ntype Inner struct{ sig x int }\ntype S struct{ inner Inner }\nfunc main(){ s := S{}; s.inner.x(2) }",
+		},
+		{
+			"索引链函数式读",
+			"package main\ntype Item struct{ sig x int }\nfunc main(){ m := map[string]Item{}; _ = m[\"a\"].x() }",
+		},
+		{
+			"三层链函数式读",
+			"package main\ntype Leaf struct{ sig x int }\ntype Mid struct{ b Leaf }\ntype S struct{ a Mid }\nfunc main(){ s := S{}; _ = s.a.b.x() }",
+		},
+		{
+			"调用结果链函数式读",
+			"package main\ntype P struct{ sig x int }\nfunc getP() P { return P{} }\nfunc main(){ _ = getP().x() }",
+		},
+		{
+			"中间段显式括号",
+			"package main\ntype Leaf struct{ sig v int }\ntype S struct{ sig leaf Leaf }\nfunc main(){ s := S{}; _ = s.leaf().v }",
+		},
+	}
+	for _, tc := range forbidden {
+		t.Run("forbid_"+tc.name, func(t *testing.T) {
+			_, err := Compile("chain.gx", tc.src)
+			if err == nil || !strings.Contains(err.Error(), "sig 字段") {
+				t.Errorf("%s 应被拦截，got: %v", tc.name, err)
+			}
+		})
+	}
+	allowed := []struct{ name, src string }{
+		{
+			"多级链裸读",
+			"package main\ntype Inner struct{ sig x int }\ntype S struct{ inner Inner }\nfunc main(){ s := S{}; _ = s.inner.x }",
+		},
+		{
+			"索引链裸读",
+			"package main\ntype Item struct{ sig x int }\nfunc main(){ m := map[string]Item{}; _ = m[\"a\"].x }",
+		},
+		{
+			"多级链赋值写",
+			"package main\ntype Inner struct{ sig x int }\ntype S struct{ inner Inner }\nfunc main(){ s := S{}; s.inner.x = 2; _ = s }",
+		},
+		{
+			"普通方法链不误伤",
+			"package main\ntype Leaf struct{}\nfunc (l Leaf) Method() int{return 1}\ntype Mid struct{ b Leaf }\ntype S struct{ a Mid }\nfunc main(){ s := S{}; _ = s.a.b.Method() }",
+		},
+		{
+			"context getter 不误伤",
+			"package main\nfunc main(){ f := func() int{return 1}; _ = f() }",
+		},
+	}
+	for _, tc := range allowed {
+		t.Run("allow_"+tc.name, func(t *testing.T) {
+			compileOK(t, "chain.gx", tc.src)
+		})
+	}
+}
+
+// 遗留缺陷回归（问题 3 / 方案 B）：早期版本只认字面 "Signal" 包名，且
+// BkImport 绑定命中即放行——用户用任意别名（显式 Signal / 无别名 signal /
+// 自定义 sr）导入 signal runtime 后，Signal.New/Effect/Batch 等底层构造器
+// 全部绕过检查。Binding 增加 ImportPath 后按 import 身份判定，别名路径全部堵死。
+func TestNoRawSignalAPIImportAliasBlocked(t *testing.T) {
+	cases := []struct{ name, src, wantName string }{
+		{"explicit-Signal-alias", "package main\nimport Signal \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc main() { n := Signal.New(1); _ = n() }", "Signal.New"},
+		{"no-alias-lowercase-pkg", "package main\nimport \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc main() { n := signal.New(1); _ = n() }", "signal.New"},
+		{"custom-alias", "package main\nimport sr \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc main() { sr.Effect(func() {}) }", "sr.Effect"},
+		{"custom-alias-batch", "package main\nimport sr \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc main() { sr.Batch(func() {}) }", "sr.Batch"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Compile("alias.gx", c.src)
+			if err == nil {
+				t.Fatalf("别名导入后的手写 %s 应被禁止", c.wantName)
+			}
+			if !strings.Contains(err.Error(), "不允许直接调用底层 API "+c.wantName) {
+				t.Errorf("错误信息应点名 %s，got: %v", c.wantName, err)
+			}
+		})
+	}
+}
+
+// 别名导入后的合法用法不受影响：类型位置（sr.Signal[int]）、小写语法糖
+// （Signal.computed/effect）、用户同名变量遮蔽（Signal := Holder{...}）。
+func TestNoRawSignalAPIImportAliasLegalUses(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"alias-type-position", "package main\nimport sr \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc f(s sr.Signal[int]) int { return s() }\nfunc main() {}", "sr.Signal[int]"},
+		{"alias-lowercase-sugar", "package main\nimport Signal \"github.com/robertpanvip/gox-core/runtime/signal\"\nfunc main() { sig n = 1; c := Signal.computed(() => n); _ = c }", "Signal.Computed("},
+		{"shadow-by-local-var", "package main\ntype Holder struct{ New int }\nfunc main() { Signal := Holder{New: 1}; _ = Signal.New }", "Holder{New: 1}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := compileOK(t, "legal.gx", c.src)
+			if !strings.Contains(got, c.want) {
+				t.Errorf("产物应包含 %q:\n%s", c.want, got)
+			}
+		})
+	}
 }

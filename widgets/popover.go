@@ -1,5 +1,7 @@
 package widgets
 
+import Signal "github.com/robertpanvip/gox-core/runtime/signal"
+
 // Popover 浮层组件——下拉菜单/Select/Dropdown/Tooltip 的共同底座。
 //
 // 它把「锚点 + 遮罩 + 浮层」组合成一棵场景树，并用条件分支（OpBranch）在 open
@@ -33,26 +35,26 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 var popoverSeq atomic.Uint64
 
-// PopoverState 是 Popover 的开关状态，内部持有一个 bool signal。
+// PopoverState 是 Popover 的开关状态，内部持有一个 bool sig 字段。
 // 业务持有它即可在任意位置打开/关闭浮层（如选中菜单项后关闭）。
 type PopoverState struct {
-	open signal.Signal[bool]
+	open Signal.Signal[bool]
 }
 
 func NewPopoverState(initial bool) *PopoverState {
-	return &PopoverState{open: signal.New(initial)}
+	var open = Signal.New(initial)
+	return &PopoverState{open: open}
 }
 
-func (s *PopoverState) Open()             { s.open(true) }
-func (s *PopoverState) Close()            { s.open(false) }
-func (s *PopoverState) Toggle()           { s.open(!s.open()) }
-func (s *PopoverState) Set(v bool)        { s.open(v) }
+func (s *PopoverState) Open()             { s.open( true )}
+func (s *PopoverState) Close()            { s.open( false )}
+func (s *PopoverState) Toggle()           { s.open( !s.open() )}
+func (s *PopoverState) Set(v bool)        { s.open( v )}
 func (s *PopoverState) IsOpen() bool      { return s.open() }
 // Getter 返回可用于 JSX 插值的 bool getter。
 func (s *PopoverState) Getter() func() bool { return func() bool { return s.open() } }
@@ -73,6 +75,7 @@ func Popover(props gxscene.Props) *gxscene.Instance {
 	stateGet := gxscene.Get[*PopoverState](props, "state")
 	openGet := gxscene.Get[bool](props, "open")
 	placement := gxscene.Get[string](props, "placement")
+	noScrim := gxscene.Get[bool](props, "noScrim")
 	offset := gxscene.Get[string](props, "offset")
 	width := gxscene.Get[string](props, "width")
 	triggerGet := gxscene.Get[any](props, "trigger")
@@ -91,6 +94,11 @@ func Popover(props gxscene.Props) *gxscene.Instance {
 		if st := stateGet(); st != nil {
 			return st.IsOpen()
 		}
+		// 受控协议声明为 open: func() bool，但 gxscene.Get 只识别 func() any
+		// getter——这里显式兑现 func() bool，否则类型断言失败恒为 false。
+		if gb, ok := props["open"].(func() bool); ok {
+			return gb()
+		}
 		return openGet()
 	}
 
@@ -103,17 +111,17 @@ func Popover(props gxscene.Props) *gxscene.Instance {
 
 	ops := []gxscene.Op{
 		// 根透明包装
-		{Code: gxscene.OpElem, Arg: "div"},
-		{Code: gxscene.OpAttr, Key: "gx-role", Arg: "anchor"},
-		{Code: gxscene.OpAttr, Key: "gx-anchor-id", Arg: uid},
-		{Code: gxscene.OpAttr, Key: "flex-direction", Arg: "column"},
+		gxscene.Op{Code: gxscene.OpElem, Arg: "div"},
+		gxscene.Op{Code: gxscene.OpAttr, Key: "gx-role", Arg: "anchor"},
+		gxscene.Op{Code: gxscene.OpAttr, Key: "gx-anchor-id", Arg: uid},
+		gxscene.Op{Code: gxscene.OpAttr, Key: "flex-direction", Arg: "column"},
 		// trigger 子组件挂在此 div 下
-		{Code: gxscene.OpElem, Arg: "div"},
-		{Code: gxscene.OpComp, Arg: "PopoverTrigger", Slot: triggerSlot},
-		{Code: gxscene.OpClose},
+		gxscene.Op{Code: gxscene.OpElem, Arg: "div"},
+		gxscene.Op{Code: gxscene.OpComp, Arg: "PopoverTrigger", Slot: triggerSlot},
+		gxscene.Op{Code: gxscene.OpClose},
 		// 浮层开关分支
-		{Code: gxscene.OpBranch, Slot: branchSlot},
-		{Code: gxscene.OpClose},
+		gxscene.Op{Code: gxscene.OpBranch, Slot: branchSlot},
+		gxscene.Op{Code: gxscene.OpClose},
 	}
 
 	// content getter 返回 *Instance；在 branch builder 内重建子树，其内部 signal 由
@@ -155,26 +163,32 @@ func Popover(props gxscene.Props) *gxscene.Instance {
 			if v := offset(); v != "" {
 				off = v
 			}
-			floatOps := []gxscene.Op{
-				// 遮罩：全屏，点击关闭
-				{Code: gxscene.OpElem, Arg: "div"},
-				{Code: gxscene.OpAttr, Key: "gx-role", Arg: "scrim"},
-				{Code: gxscene.OpEvent, Key: "onClick", Slot: 0},
-				{Code: gxscene.OpClose},
-				// 浮层内容
-				{Code: gxscene.OpElem, Arg: "div"},
-				{Code: gxscene.OpAttr, Key: "gx-role", Arg: "popover"},
-				{Code: gxscene.OpAttr, Key: "gx-anchor", Arg: uid},
-				{Code: gxscene.OpAttr, Key: "gx-placement", Arg: p},
-				{Code: gxscene.OpAttr, Key: "gx-offset", Arg: off},
-				{Code: gxscene.OpAttr, Key: "bg", Arg: AppleMaterialReg},
-				{Code: gxscene.OpAttr, Key: "border-radius", Arg: RadiusCard},
-				{Code: gxscene.OpAttr, Key: "border", Arg: AppleHairline},
-				{Code: gxscene.OpAttr, Key: "border-width", Arg: "1"},
-				{Code: gxscene.OpAttr, Key: "box-shadow", Arg: ShadowFloat},
-				{Code: gxscene.OpAttr, Key: "flex-direction", Arg: "column"},
-				{Code: gxscene.OpAttr, Key: "padding", Arg: "6"},
+			var floatOps []gxscene.Op
+			if !noScrim() {
+				// 遮罩：全屏，点击关闭（noScrim 模式跳过——顶部菜单条场景用
+				// 全局点击收起，不挡住相邻顶级菜单的点击切换，桌面语义）。
+				floatOps = append(floatOps,
+					gxscene.Op{Code: gxscene.OpElem, Arg: "div"},
+					gxscene.Op{Code: gxscene.OpAttr, Key: "gx-role", Arg: "scrim"},
+					gxscene.Op{Code: gxscene.OpEvent, Key: "onClick", Slot: 0},
+					gxscene.Op{Code: gxscene.OpClose},
+				)
 			}
+			// 浮层内容
+			floatOps = append(floatOps,
+				gxscene.Op{Code: gxscene.OpElem, Arg: "div"},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "gx-role", Arg: "popover"},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "gx-anchor", Arg: uid},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "gx-placement", Arg: p},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "gx-offset", Arg: off},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "bg", Arg: ThemeMaterial},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "border-radius", Arg: RadiusCard},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "border", Arg: ThemeHairline},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "border-width", Arg: HairlineWidth},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "box-shadow", Arg: ShadowFloat},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "flex-direction", Arg: "column"},
+				gxscene.Op{Code: gxscene.OpAttr, Key: "padding", Arg: "6"},
+			)
 			if w := width(); w != "" {
 				floatOps = append(floatOps, gxscene.Op{Code: gxscene.OpAttr, Key: "width", Arg: w})
 			}

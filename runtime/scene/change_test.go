@@ -3,7 +3,7 @@ package gxscene
 import (
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 func TestChangesDisabledByDefault(t *testing.T) {

@@ -3,7 +3,7 @@ package signal_test
 import (
 	"testing"
 
-	"github.com/robertpanvip/gox/runtime/signal"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // AfterEffects 在每批 effect 跑完后触发一次；钩子在锁外执行，可安全读 signal。

@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/robertpanvip/gox/internal/buildcheck"
+	"github.com/robertpanvip/gox-core/internal/buildcheck"
+	"github.com/robertpanvip/gox-core/internal/typecheck"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
 )
 
 // Server 是 GX 语言服务器。
@@ -17,6 +19,8 @@ type Server struct {
 	out     io.Writer
 	docs    map[string]*document // uri -> 文档状态
 	checker *buildcheck.Checker
+	// timp 类型感知补全会话（点号上下文惰性创建，std 依赖图只建一次）
+	timp *typecheck.Importer
 }
 
 type document struct {
@@ -30,7 +34,7 @@ func NewServer(in io.Reader, out io.Writer, checker *buildcheck.Checker) *Server
 	if checker == nil {
 		checker = buildcheck.New(64)
 		// 生成的 Go 代码声明 go 1.27；固定 toolchain 避免默认 go 联网下载卡住。
-		checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.3")
+		checker.SetToolchain("go", "GOTOOLCHAIN=go1.27.4")
 	}
 	return &Server{
 		in:      in,
@@ -88,12 +92,25 @@ func (s *Server) handleRequest(req *RequestMessage, body []byte) (any, *RPCError
 	case "initialize":
 		return InitializeResult{
 			Capabilities: ServerCapabilities{
-				TextDocumentSync:       1, // full
-				DefinitionProvider:     true,
-				HoverProvider:          true,
-				CompletionProvider:     &CompletionOptions{TriggerCharacters: []string{"."}},
-				DocumentSymbolProvider: true,
-				RenameProvider:         true,
+				TextDocumentSync:           1, // full
+				DefinitionProvider:         true,
+				HoverProvider:              true,
+				CompletionProvider:         &CompletionOptions{TriggerCharacters: []string{"."}, ResolveProvider: true},
+				SignatureHelpProvider:      &SignatureHelpOptions{TriggerCharacters: []string{"(", ","}},
+				DocumentSymbolProvider:     true,
+				TypeDefinitionProvider:     true,
+				ImplementationProvider:     true,
+				RenameProvider:             true,
+				DocumentFormattingProvider: true,
+				ReferencesProvider:         true,
+				DocumentHighlightProvider:  true,
+				CodeActionProvider:         &CodeActionOptions{CodeActionKinds: []string{"quickfix", "source.organizeImports"}},
+				DiagnosticProvider:         &DiagnosticOptions{},
+				WorkspaceSymbolProvider:    true,
+				Workspace: &WorkspaceOptions{FileOperations: &FileOperationOptions{
+					WillRenameFiles: &FileOperationRegistrationOptions{Filters: []DocumentFilter{{Pattern: "**/*.gx"}}},
+					DidRenameFiles:  &FileOperationRegistrationOptions{Filters: []DocumentFilter{{Pattern: "**/*.gx"}}},
+				}},
 			},
 			ServerInfo: ServerInfo{Name: "gox-lsp", Version: "0.1.0"},
 		}, nil
@@ -103,12 +120,38 @@ func (s *Server) handleRequest(req *RequestMessage, body []byte) (any, *RPCError
 		return s.definition(body)
 	case "textDocument/hover":
 		return s.hover(body)
+	case "textDocument/typeDefinition":
+		return s.typeDefinition(body)
+	case "textDocument/implementation":
+		return s.implementation(body)
+	case "textDocument/references":
+		return s.references(body)
+	case "textDocument/documentHighlight":
+		return s.documentHighlight(body)
+	case "textDocument/codeAction":
+		return s.codeAction(body)
+	case "textDocument/semanticTokens/full":
+		return s.semanticTokens(body)
+	case "textDocument/inlayHints":
+		return s.inlayHints(body)
+	case "completionItem/resolve":
+		return s.completionResolve(body)
+	case "textDocument/diagnostic":
+		return s.pullDiagnostic(body)
+	case "workspace/willRenameFiles":
+		return s.willRenameFiles(body)
+	case "workspace/symbol":
+		return s.workspaceSymbol(body)
+	case "textDocument/signatureHelp":
+		return s.signatureHelp(body)
 	case "textDocument/completion":
 		return s.completion(body)
 	case "textDocument/documentSymbol":
 		return s.documentSymbol(body)
 	case "textDocument/rename":
 		return s.rename(body)
+	case "textDocument/formatting":
+		return s.formatting(body)
 	default:
 		return nil, &RPCError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)}
 	}
@@ -134,6 +177,8 @@ func (s *Server) handleNotification(req *RequestMessage, body []byte, w *bufio.W
 				s.publishDiagnostics(p.TextDocument.URI, w)
 			}
 		}
+	case "workspace/didRenameFiles":
+		s.didRenameFiles(body, w)
 	case "textDocument/didClose":
 		var p DidCloseParams
 		if json.Unmarshal(body, &p) == nil {
@@ -189,6 +234,9 @@ func (s *Server) definition(body []byte) (any, *RPCError) {
 	if !ok {
 		return nil, nil
 	}
+	if loc, ok := s.typedDefinition(d.Text, p.Position.Line, p.Position.Character); ok {
+		return loc, nil
+	}
 	sm := s.symbolMap(d)
 	lines := strings.Split(d.Text, "\n")
 	sym := sm.At(lines, p.Position.Line, p.Position.Character)
@@ -218,6 +266,9 @@ func (s *Server) hover(body []byte) (any, *RPCError) {
 	lines := strings.Split(d.Text, "\n")
 	sym := sm.At(lines, p.Position.Line, p.Position.Character)
 	if sym == nil {
+		if hv, ok := s.typedHover(d.Text, p.Position.Line, p.Position.Character); ok {
+			return hv, nil
+		}
 		return nil, nil
 	}
 	value := fmt.Sprintf("**%s** — %s\n\n`%s`", sym.Name, sym.Doc, sym.Detail)
@@ -232,6 +283,17 @@ func (s *Server) completion(body []byte) (any, *RPCError) {
 	d, ok := s.docForURI(p.TextDocument.URI)
 	if !ok {
 		return CompletionList{}, nil
+	}
+	// import 路径补全：光标在 import 字符串内（源码半截也能给清单）
+	if prefix, ok := typecheck.ImportContext(d.Text, p.Position.Line, p.Position.Character); ok {
+		if items := navImportItems(prefix); len(items) > 0 {
+			return CompletionList{IsIncomplete: false, Items: items}, nil
+		}
+	}
+	// 类型感知优先：点号上下文命中成员则直接返回（非点号/无类型层/映射失败
+	// 时 typedCompletion 自返回 ok=false，行为回退到符号表，零回归）
+	if items, ok := s.typedCompletion(d.Text, p.Position.Line, p.Position.Character); ok {
+		return CompletionList{IsIncomplete: false, Items: items}, nil
 	}
 	sm := s.symbolMap(d)
 
@@ -362,6 +424,9 @@ func (s *Server) rename(body []byte) (any, *RPCError) {
 	if !ok {
 		return nil, &RPCError{Code: -32602, Message: "document not opened"}
 	}
+	if we, ok := s.workspaceRename(p); ok {
+		return we, nil
+	}
 	lines := splitLines(d.Text)
 	sm := s.symbolMap(d)
 	sym := sm.At(lines, p.Position.Line, p.Position.Character)
@@ -402,6 +467,32 @@ func (s *Server) rename(body []byte) (any, *RPCError) {
 }
 
 // findIdentifierEdits 扫描所有行的标识符，按 replacements 精确替换，编辑范围按实际拼写宽度。
+// formatting 处理 textDocument/formatting：返回覆盖全文的 TextEdit。
+// 与 gox fmt 共用 compiler.Format，确保 CLI 与 LSP 行为一致。
+func (s *Server) formatting(body []byte) (any, *RPCError) {
+	var p DocumentFormattingParams
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, &RPCError{Code: -32700, Message: err.Error()}
+	}
+	d := s.docs[p.TextDocument.URI]
+	if d == nil {
+		return []TextEdit{}, nil
+	}
+	out := compiler.Format(d.Text)
+	if out == d.Text {
+		return []TextEdit{}, nil
+	}
+	lines := strings.Split(d.Text, "\n")
+	endLine := len(lines) - 1
+	return []TextEdit{{
+		Range: Range{
+			Start: Position{Line: 0, Character: 0},
+			End:   Position{Line: endLine, Character: len(lines[endLine])},
+		},
+		NewText: out,
+	}}, nil
+}
+
 func findIdentifierEdits(lines []string, replacements map[string]string) []TextEdit {
 	var edits []TextEdit
 	for li, line := range lines {

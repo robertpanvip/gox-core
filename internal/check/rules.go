@@ -6,7 +6,7 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/robertpanvip/gox/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
 )
 
 // =============================================================================

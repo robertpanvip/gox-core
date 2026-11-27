@@ -3,7 +3,7 @@
 // 它是一组「组件函数」——签名为 func(gxscene.Props) *gxscene.Instance，与 GX
 // 编译器对大写组件名的调用约定完全一致。因此 GX 侧只需：
 //
-//	import widgets "github.com/robertpanvip/gox/widgets"
+//	import widgets "github.com/robertpanvip/gox-core/widgets"
 //	<widgets.button label="Go" variant="primary" onClick={...}/>
 //
 // 全部外观（配色、圆角、描边、间距、字号）都预制在这里，业务 JSX 只描述语义。
@@ -23,29 +23,40 @@
 // GUI 层（如 GLFW 适配）只需在命中/键盘回调里调这几个函数，无需理解控件内部结构。
 package widgets
 
+import Signal "github.com/robertpanvip/gox-core/runtime/signal"
+
 import (
 	"fmt"
 	"strconv"
 	"sync/atomic"
 	"time"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
-// ---- 预制主题（Apple HIG 深色模式）----
+// ---- 预制主题（Apple HIG，默认深色，SetTheme 可整体切换）----
 // 集中在这里，业务无需（也不应）在 JSX 里散写颜色。tone 名 → 强调色。
-// Theme* 常量保留原名称以兼容现有业务与测试，取值改为 Apple 系统色；
+// Theme* 保留原名称以兼容现有业务与测试；它们现在由 SetTheme 同步为当前
+// 明暗主题的令牌值，因此旧组件在浅色主题下也不会残留深色控件。
 // 更完整的 Apple 配色/圆角/阴影/材质标度见 apple_theme.go。
-const (
-	ThemeBg      = AppleWindowBg   // 页面底色
-	ThemePanel   = AppleElevated   // 卡片底
-	ThemeBorder  = AppleSeparator  // 常规描边
-	ThemeText    = AppleLabel      // 主文字
-	ThemeMuted   = AppleLabel2     // 次要文字/占位符
-	ThemeAccent  = AppleBlue       // 主强调（系统蓝）
-	ThemeInputBg = AppleInputBg    // 输入框底（光标靠同色隐藏）
-	CursorColor  = AppleBlue
+var (
+	ThemeBg       = AppleWindowBg   // 页面底色
+	ThemeGrouped  = AppleGroupedBg  // 分组底
+	ThemePanel    = AppleElevated   // 卡片底
+	ThemeFill     = AppleFill       // 控件填充 / 次级底
+	ThemeSkeleton = AppleFill2      // 骨架屏占位块
+	ThemeBorder   = AppleSeparator  // 常规描边
+	ThemeBorder2  = AppleSeparator2 // 更亮描边 / 分隔线
+	ThemeHairline = AppleHairline   // 高光细描边（浮层）
+	ThemeMaterial = AppleMaterialThick // 半透明材质（浮层）
+	ThemeScrim    = AppleScrim      // 遮罩
+	ThemeText     = AppleLabel      // 主文字
+	ThemeMuted    = AppleLabel2     // 次要文字/占位符
+	ThemeFaint    = AppleLabel3     // 三级文字
+	ThemeOnAccent = "#ffffff"       // 强调色背景上的文字
+	ThemeAccent   = AppleBlue       // 主强调（系统蓝）
+	ThemeInputBg  = AppleInputBg    // 输入框底（光标靠同色隐藏）
+	CursorColor   = AppleBlue
 )
 
 var tones = map[string]string{
@@ -68,26 +79,42 @@ func toneColor(tone string) string {
 	if c, ok := tones[tone]; ok {
 		return c
 	}
+	// 语义令牌（onaccent/text/muted/…）走当前主题全局，避免"onaccent 兜底成
+	// accent 蓝"导致强调色背景上的元素隐形（与 semanticToneColor 同源语义）。
+	if c := semanticToneColor(tone); c != "" {
+		return c
+	}
 	return ThemeAccent
 }
 
 // ---------- 焦点与光标状态（全局，signal 驱动重绘）----------
 
 var (
-	focusToken = signal.New("")   // 当前聚焦输入框的 token；空串表示无焦点
-	blinkOn    = signal.New(true) // 光标是否可见
-	inputSeq   atomic.Uint64      // token 生成器
+	inputSeq atomic.Uint64 // token 生成器
 )
+
+var focusToken = Signal.New(""   )// 当前聚焦输入框的 token；空串表示无焦点
+var blinkOn = Signal.New(true )// 光标是否可见
+
+// toggleBlink 经 UI Runtime 投递翻转光标状态。
+//
+// 它是 blinkOn 唯一的写入点。后台 ticker 只负责定时调用它，绝不直接读写
+// 响应式 signal——读写会重建依赖图（clearDeps/track 改 map），与 UI 线程
+// 并发写会触发 fatal error: concurrent map writes。UI 未就绪/已关闭时
+// Signal.safe 安全跳过，不静默在后台线程执行。
+func toggleBlink() {
+	Signal.Safe(func() { blinkOn(!blinkOn() )})
+}
 
 func init() {
 	// 光标闪烁：每 530ms 翻转一次。写 signal 会触发订阅了光标 getter 的 app
 	// 聚合 effect 重跑 → Update → Draw。窗口关闭后 effect 被 Dispose，写 signal
-	// 不再触发任何重绘，goroutine 本身无副作用。
+	// 不再触发任何重绘。
 	go func() {
 		t := time.NewTicker(530 * time.Millisecond)
 		defer t.Stop()
 		for range t.C {
-			blinkOn(!blinkOn())
+			toggleBlink()
 		}
 	}()
 }
@@ -109,64 +136,101 @@ func Button(props gxscene.Props) *gxscene.Instance {
 	variant := gxscene.Get[string](props, "variant")
 	width := gxscene.Get[string](props, "width")
 	height := gxscene.Get[string](props, "height")
+	icon := gxscene.Get[string](props, "icon") // 可选前置矢量图标名
 
 	bgSlot, colorSlot, borderSlot := 0, 1, 2
-	clickSlot, labelSlot := 3, 4
+	clickSlot, labelSlot, iconSlot := 3, 4, 5
+
+	// 全部走主题 getter：主题切换时按钮自动重绘（浅色模式不再残留深色底）。
+	accentOf := tkTone("primary")
+	dangerOf := tkTone("danger")
+	panelOf := tkPanel()
+	bgOf := tkBg()
+	textOf := tkText()
+	onAccentOf := tkOnAccent()
+	borderOf := tkBorder()
 
 	bgGetter := func() any {
 		switch variant() {
 		case "primary":
-			return toneColor("primary")
+			return accentOf()
 		case "danger":
-			return toneColor("danger")
+			return dangerOf()
 		case "ghost":
-			return ThemePanel
+			return panelOf()
 		default:
-			return ThemePanel
+			return panelOf()
 		}
 	}
 	colorGetter := func() any {
 		switch variant() {
 		case "primary", "danger":
-			return AppleLabel // 系统蓝/红底配白字
+			return onAccentOf() // 实色底配白字
 		default:
-			return ThemeText
+			return textOf()
 		}
 	}
 	borderGetter := func() any {
 		switch variant() {
-		case "primary", "danger":
-			return toneColor(variant())
+		case "primary":
+			return accentOf()
+		case "danger":
+			return dangerOf()
 		case "ghost":
-			return ThemeBg // 与底同色 → 视觉无描边
+			return bgOf() // 与底同色 → 视觉无描边
 		default:
-			return ThemeBorder
+			return borderOf()
 		}
 	}
 
 	ops := []gxscene.Op{
 		el("button"),
-		attr("padding", "11"), attr("border-radius", RadiusControl),
-		attr("border-width", "1"), attr("font-size", "15"), attr("weight", "bold"),
+		// macOS 控件高 28pt：固定 height + 对称 padding，紧凑对齐 HIG。
+		attr("padding", "7"), attr("border-radius", RadiusSmall),
+		attr("border-width", HairlineWidth), attr("font-size", FontBody), attr("weight", "bold"),
+		// icon + label 横向并排：显式 row，否则默认 column 会把图标与文字竖排。
+		attr("flex-direction", "row"), attr("gap", "5"),
 		attr("align-items", "center"), attr("justify-content", "center"),
+		attr("height", ControlHeight),
+		// 可点击控件统一 pointer 光标（Web 原生 button 默认是 default）。
+		attr("cursor", "pointer"),
 		dynAttr("bg", bgSlot), dynAttr("color", colorSlot), dynAttr("border", borderSlot),
 	}
 	n := 5
+	hasIcon := icon() != ""
+	if hasIcon {
+		n = 6
+	}
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))
 	}
 	if h := height(); h != "" {
 		ops = append(ops, attr("height", h))
 	}
-	ops = append(ops, event("onClick", clickSlot), dynChild(labelSlot), closeEl())
+	ops = append(ops, event("onClick", clickSlot))
+	if hasIcon {
+		ops = append(ops, gxscene.Op{Code: gxscene.OpComp, Arg: "ButtonIcon", Slot: iconSlot})
+	}
+	ops = append(ops, dynChild(labelSlot), closeEl())
 
-	return gxscene.Render(gxscene.Template{Ops: ops, N: n},
+	getters := []func() any{
 		func() any { return bgGetter() },
 		func() any { return colorGetter() },
 		func() any { return borderGetter() },
 		func() any { return gxscene.Get[gxscene.Handler](props, "onClick")() },
 		func() any { return label() },
-	)
+	}
+	if hasIcon {
+		getters = append(getters, func() any {
+			// 实色按钮（primary/danger）图标用白，其它用正文色。
+			tone := "text"
+			if v := variant(); v == "primary" || v == "danger" {
+				tone = "onaccent"
+			}
+			return iconNode(icon(), 15, tone)
+		})
+	}
+	return gxscene.Render(gxscene.Template{Ops: ops, N: n}, getters...)
 }
 
 // ---------- Input ----------
@@ -194,38 +258,54 @@ func Input(props gxscene.Props) *gxscene.Instance {
 	placeholder := gxscene.Get[string](props, "placeholder")
 	width := gxscene.Get[string](props, "width")
 	tone := gxscene.Get[string](props, "tone")
+	icon := gxscene.Get[string](props, "icon") // 可选前置矢量图标名
 
 	w := width()
 	if w == "" {
 		w = "240"
 	}
-	accent := toneColor(tone())
+	// 全部主题 getter：跟随明暗切换。
+	accentOf := tkTone(tone())
+	inputBgOf := tkInput()
+	borderOf := tkBorder()
+	textOf := tkText()
+	mutedOf := tkMuted()
 
 	const (
 		borderSlot = iota
+		bgSlot
 		textColorSlot
 		cursorSlot
 		textSlot
 		valueSlot // 把当前值写回根 Props["value"]，供 GUI 层计算插入/退格后的新文本
 		inputSlot
+		iconSlot
 		nSlots
 	)
 
+	hasIcon := icon() != ""
 	ops := []gxscene.Op{
 		el("input"),
 		attr("gx-input-id", focusID),
-		attr("bg", ThemeInputBg), attr("border-radius", RadiusControl),
-		attr("border-width", "1"), attr("padding", "10"), attr("height", "20"),
+		attr("border-radius", RadiusSmall),
+		// macOS 输入框高 28pt：固定 height + padding，13px 文字自然居中。
+		attr("border-width", HairlineWidth), attr("padding", "6"), attr("height", ControlHeight),
 		attr("flex-direction", "row"), attr("align-items", "center"), attr("width", w),
-		dynAttr("border", borderSlot),
+		dynAttr("bg", bgSlot), dynAttr("border", borderSlot),
 		dynAttr("value", valueSlot),
 		event("onInput", inputSlot),
-		// 文本：值非空显示值（亮色），否则显示占位符（灰）。
-		el("span"), attr("font-size", "15"), dynAttr("color", textColorSlot), dynChild(textSlot), closeEl(),
-		// 光标：2px 宽的色块；未聚焦或非闪烁相位时用输入底同色隐藏。
-		el("span"), attr("width", "2"), attr("height", "16"), dynAttr("bg", cursorSlot), closeEl(),
-		closeEl(),
 	}
+	if hasIcon {
+		// 可选前置矢量图标（如 search），随主题用 muted 色。
+		ops = append(ops, gxscene.Op{Code: gxscene.OpComp, Arg: "InputIcon", Slot: iconSlot})
+	}
+	ops = append(ops,
+		// 文本：值非空显示值（亮色），否则显示占位符（灰）。
+		el("span"), attr("font-size", FontBody), dynAttr("color", textColorSlot), dynChild(textSlot), closeEl(),
+		// 光标：2px 宽的色块；未聚焦或非闪烁相位时用输入底同色隐藏。
+		el("span"), attr("width", "2"), attr("height", "13"), dynAttr("bg", cursorSlot), closeEl(),
+		closeEl(),
+	)
 
 	focused := func() bool { return focusToken() == focusID }
 	text := func() string {
@@ -236,24 +316,33 @@ func Input(props gxscene.Props) *gxscene.Instance {
 		return placeholder()
 	}
 
-	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
+	// 无前置图标时不声明 iconSlot，N 收敛到 inputSlot+1，避免空 getter 返回 nil
+	// 被 embedValue 当子树解引用而崩溃。
+	n := nSlots
+	if !hasIcon {
+		n = inputSlot + 1
+	}
+	return gxscene.Render(gxscene.Template{Ops: ops, N: n},
 		func() any { // border
 			if focused() {
-				return accent
+				return accentOf()
 			}
-			return ThemeBorder
+			return borderOf()
+		},
+		func() any { // bg
+			return inputBgOf()
 		},
 		func() any { // text color
 			if value() != "" {
-				return ThemeText
+				return textOf()
 			}
-			return ThemeMuted
+			return mutedOf()
 		},
 		func() any { // cursor bg
 			if focused() && blinkOn() {
-				return CursorColor
+				return accentOf()
 			}
-			return ThemeInputBg
+			return inputBgOf()
 		},
 		func() any { return text() },
 		func() any { return value() },
@@ -264,6 +353,7 @@ func Input(props gxscene.Props) *gxscene.Instance {
 			}
 			return h
 		},
+		func() any { return iconNode(icon(), 15, "muted") },
 	)
 }
 
@@ -303,7 +393,7 @@ func Focus(n *gxscene.Node) {
 }
 
 // Blur 清空焦点。
-func Blur() { focusToken("") }
+func Blur() { focusToken("" )}
 
 // Focused 返回当前是否有聚焦输入框。
 func Focused() bool { return focusToken() != "" }
@@ -392,36 +482,7 @@ func InputBackspace(n *gxscene.Node) bool {
 // ---------- Card / Badge / Progress / Divider ----------
 
 // Card 预制圆角卡片容器。props: title, width, padding, tone（左侧强调条颜色），children。
-func Card(props gxscene.Props) *gxscene.Instance {
-	title := gxscene.Get[string](props, "title")
-	width := gxscene.Get[string](props, "width")
-	padding := gxscene.Get[string](props, "padding")
-	tone := gxscene.Get[string](props, "tone")
-	children := gxscene.Child(props)
-
-	pad := padding()
-	if pad == "" {
-		pad = "16"
-	}
-	ops := []gxscene.Op{
-		el("div"), attr("bg", ThemePanel), attr("border", AppleSeparator),
-		attr("border-width", "1"), attr("border-radius", RadiusCard),
-		attr("box-shadow", ShadowCard),
-		attr("padding", pad), attr("flex-direction", "column"), attr("gap", "8"),
-	}
-	if w := width(); w != "" {
-		ops = append(ops, attr("width", w))
-	}
-	ops = append(ops,
-		el("span"), attr("color", toneColor(tone())), attr("font-size", "12"), attr("weight", "bold"),
-		dynChild(0), closeEl(),
-		dynChild(1), closeEl(),
-	)
-	return gxscene.Render(gxscene.Template{Ops: ops, N: 2},
-		func() any { return title() },
-		func() any { return children() },
-	)
-}
+// Card 已迁移到 card.gx（GX 语言编写），编译产物为 card.go。
 
 // Badge 预制小徽章。props: label, tone, dot（是否前置圆点）。
 func Badge(props gxscene.Props) *gxscene.Instance {
@@ -429,22 +490,31 @@ func Badge(props gxscene.Props) *gxscene.Instance {
 	tone := gxscene.Get[string](props, "tone")
 	dot := gxscene.Get[bool](props, "dot")
 
-	colorSlot, labelSlot := 0, 1
+	toneOf := tkTone(tone())
+	panelOf := tkPanel()
+
+	const (
+		bgSlot = iota
+		colorSlot
+		labelSlot
+		nSlots
+	)
 	ops := []gxscene.Op{
-		el("span"), attr("bg", ThemePanel), attr("border-radius", "12"),
-		attr("padding", "7"), attr("font-size", "13"), attr("weight", "bold"),
-		attr("flex-direction", "row"), attr("align-items", "center"), attr("gap", "6"),
-		dynAttr("color", colorSlot),
+		el("span"), attr("border-radius", RadiusPill),
+		attr("padding", "5"), attr("font-size", FontFootnote), attr("weight", "bold"),
+		attr("flex-direction", "row"), attr("align-items", "center"), attr("gap", "5"),
+		dynAttr("bg", bgSlot), dynAttr("color", colorSlot),
 	}
 	if dot() {
 		ops = append(ops,
-			el("span"), attr("width", "8"), attr("height", "8"),
-			attr("bg", toneColor(tone())), attr("border-radius", "4"), closeEl(),
+			el("span"), attr("width", "7"), attr("height", "7"),
+			attr("border-radius", "4"), dynAttr("bg", colorSlot), closeEl(),
 		)
 	}
 	ops = append(ops, dynChild(labelSlot), closeEl())
-	return gxscene.Render(gxscene.Template{Ops: ops, N: 2},
-		func() any { return toneColor(tone()) },
+	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
+		func() any { return panelOf() },
+		func() any { return toneOf() },
 		func() any { return label() },
 	)
 }
@@ -461,20 +531,27 @@ func Progress(props gxscene.Props) *gxscene.Instance {
 		w = "300"
 	}
 	trackW, _ := strconv.Atoi(w)
-	accent := toneColor(tone())
+	accentOf := tkTone(tone())
+	mutedOf := tkMuted()
+	trackOf := tkInput()
 
 	const (
 		fillSlot = iota
+		trackBgSlot
+		fillBgSlot
+		labelColorSlot
 		labelSlot
 		nSlots
 	)
 	ops := []gxscene.Op{
-		el("div"), attr("flex-direction", "column"), attr("gap", "8"), attr("width", w),
-		el("span"), attr("color", ThemeMuted), attr("font-size", "13"), attr("weight", "bold"),
-		dynChild(labelSlot), closeEl(),
-		el("div"), attr("bg", ThemeInputBg), attr("border-radius", "7"), attr("height", "14"),
-		el("div"), attr("bg", accent), attr("height", "14"), attr("border-radius", "7"),
-		dynAttr("width", fillSlot), closeEl(),
+		el("div"), attr("flex-direction", "column"), attr("gap", "6"), attr("width", w),
+		el("span"), attr("font-size", FontCallout), attr("weight", "bold"),
+		dynAttr("color", labelColorSlot), dynChild(labelSlot), closeEl(),
+		// macOS 进度条：轨道 6px、圆角胶囊、强调色填充。
+		el("div"), attr("border-radius", RadiusPill), attr("height", "6"),
+		dynAttr("bg", trackBgSlot),
+		el("div"), attr("height", "6"), attr("border-radius", RadiusPill),
+		dynAttr("bg", fillBgSlot), dynAttr("width", fillSlot), closeEl(),
 		closeEl(), closeEl(),
 	}
 	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
@@ -488,6 +565,9 @@ func Progress(props gxscene.Props) *gxscene.Instance {
 			}
 			return strconv.Itoa(trackW * v / 100)
 		},
+		func() any { return trackOf() },
+		func() any { return accentOf() },
+		func() any { return mutedOf() },
 		func() any { return label() },
 	)
 }
@@ -495,12 +575,15 @@ func Progress(props gxscene.Props) *gxscene.Instance {
 // Divider 预制分隔线。props: width（默认 100% 由父撑开）。
 func Divider(props gxscene.Props) *gxscene.Instance {
 	width := gxscene.Get[string](props, "width")
-	ops := []gxscene.Op{el("div"), attr("bg", ThemeBorder), attr("height", "1")}
+	borderOf := tkBorder()
+	ops := []gxscene.Op{el("div"), attr("height", "1"), dynAttr("bg", 0)}
 	if w := width(); w != "" {
 		ops = append(ops, attr("width", w))
 	}
 	ops = append(ops, closeEl())
-	return gxscene.Render(gxscene.Template{Ops: ops, N: 0})
+	return gxscene.Render(gxscene.Template{Ops: ops, N: 1},
+		func() any { return borderOf() },
+	)
 }
 
 // Row 预制横向 flex 容器。props: gap, align, justify, children。

@@ -24,7 +24,7 @@ func TestForItemSigFieldReadGetsCall(t *testing.T) {
 		{
 			name: "render body 直接插值",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; sig name string }
 func main() {
 	sig users = []User{{1,"Tom"}}
@@ -37,7 +37,7 @@ func main() {
 		{
 			name: "key lambda 读 sig 字段",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { sig name string }
 func main() {
 	sig users = []User{{"Tom"}}
@@ -50,7 +50,7 @@ func main() {
 		{
 			name: "item sig 字段传入组件 sig props",
 			src: `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { sig name string }
 type CardProps struct { sig title string }
 func Card(p CardProps) *gxscene.Instance { return nil }

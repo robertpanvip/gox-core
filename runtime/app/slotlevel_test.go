@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	gxapp "github.com/robertpanvip/gox/runtime/app"
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxapp "github.com/robertpanvip/gox-core/runtime/app"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // T1.1 验收：只写一个 signal 时，另一个插槽的 getter 不应被求值。

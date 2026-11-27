@@ -1,6 +1,6 @@
 package gxapp
 
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 
 // Frame 是一次 Host → Backend 的完整提交（Host 架构评审 P0：全量快照与增量补丁
 // 的统一提交契约）。

@@ -263,7 +263,7 @@ func inferLambdaTypes(toks []Token, l *lambdaExpr, an *Analysis, b *Bindings, si
 		l.bodyResult = ctxResult
 		return
 	}
-	l.bodyResult = inferExprType(toks, l.bodyFrom, l.bodyTo, l.params, sigTypes)
+	l.bodyResult = inferExprType(toks, l.bodyFrom, l.bodyTo, l.params, sigTypes, b)
 	if l.bodyResult == "" {
 		l.bodyResult = "any"
 	}
@@ -640,7 +640,9 @@ func signalGetterResultType(toks []Token, start, end int, params []lambdaParam, 
 }
 
 // inferExprType 推断 [start,end) 表达式的结果类型。
-func inferExprType(toks []Token, start, end int, params []lambdaParam, sigTypes map[string]string) string {
+// b 可选（可变参数）：提供时额外识别「本文件函数调用」「struct 字段访问」
+// 两类本可静态确定的 body，避免 lambda 返回类型无谓降级 any。
+func inferExprType(toks []Token, start, end int, params []lambdaParam, sigTypes map[string]string, b ...*Bindings) string {
 	if start >= end {
 		return ""
 	}
@@ -711,16 +713,166 @@ func inferExprType(toks []Token, start, end int, params []lambdaParam, sigTypes 
 	if toks[start].is("len") {
 		return "int"
 	}
-	// 字符串拼接：含任意字符串字面量 → string
+	// 字符串拼接：含任意顶层（depth==0）字符串字面量 → string。
+	// 深度追踪：`f(x, "s")` 里的 "s" 在括号内，不能据此断定整个表达式是 string。
+	depth = 0
 	for i := start; i < end; i++ {
-		if toks[i].Kind == String || toks[i].Kind == Template {
+		t := toks[i]
+		switch t.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		}
+		if depth <= 0 && (t.Kind == String || t.Kind == Template) {
 			return "string"
 		}
 	}
-	// 第一个字面量兜底
+	// 第一个字面量兜底（仅限顶层 token）：`users[0].name` 的下标 0 在括号内，
+	// 不得把整个表达式误判成 int（遗留缺陷——lambda 返回类型误推成下标类型）。
+	depth = 0
 	for i := start; i < end; i++ {
-		if lt := literalType(toks[i]); lt != "" {
+		t := toks[i]
+		switch t.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			depth--
+		}
+		if depth > 0 {
+			continue
+		}
+		if lt := literalType(t); lt != "" {
 			return lt
+		}
+	}
+	// 绑定辅助推断：本文件函数调用 / struct 字段访问。
+	// 这两类 body 在 GX 组件里极常见（x => makeCell(x)、p => p.Name），
+	// 类型其实完全静态可知；此前一律降级 any，导致 lambda 结果类型失真。
+	if len(b) > 0 && b[0] != nil {
+		if t := inferExprTypeFromBindings(toks, start, end, params, b[0]); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// inferExprTypeFromBindings 从函数签名表与 struct 字段声明推断表达式类型。
+// 只认确定形态，跨包/未知一律放弃（交回调用方降级 any，不误报）：
+//  1. `ident(args...)` —— 本文件具名函数调用，取首个返回类型；
+//  2. `recv.Field`     —— 已知类型的 lambda 参数/绑定变量的字段访问，取字段声明类型。
+//     形态 2 覆盖索引链 `users[0].name`、多级链 `u.inner.name` 与指针 `*T` 解引用：
+//     基础类型沿 `[...]`（切片/数组解包）与 `.字段`（struct 字段传播）逐段推进。
+func inferExprTypeFromBindings(toks []Token, start, end int, params []lambdaParam, b *Bindings) string {
+	first := nextSigIn(toks, start, end)
+	if first < 0 || toks[first].Kind != Ident || isGoKeyword(toks[first].Text) {
+		return ""
+	}
+
+	// 形态 1：函数调用 ident(...)。calledFuncResult 只认起始调用且返回类型已知。
+	if t := calledFuncResult(toks, first, end, b); t != "" {
+		return t
+	}
+
+	// 形态 2：链式访问 recv.field / recv[i].field / recv.a.b。基础类型来源：
+	// lambda 参数注解优先，其次 Bindings 里的绑定变量类型（如 users := []User{...}）。
+	recvName := toks[first].Text
+	base := ""
+	for _, p := range params {
+		if p.name == recvName && p.typeText != "" {
+			base = p.typeText
+			break
+		}
+	}
+	if base == "" && b != nil {
+		if bd := b.ResolveAt(recvName, toks[first].Pos); bd != nil && bd.Type != "" {
+			base = bd.Type
+		}
+	}
+	if base == "" {
+		return ""
+	}
+
+	// 沿链推进：`[` 跳到匹配的 `]`（切片/数组解包一层），`.field` 取 struct 字段类型。
+	i := nextSigIn(toks, first+1, end)
+	for i >= 0 {
+		switch toks[i].Text {
+		case "[":
+			// 索引：解包切片/数组元素类型。要求闭合的 ] 且无函数调用形态（`[` 后
+			// 出现 `(` 说明是泛型实例化或其他，放弃推断）。
+			depth := 0
+			close := -1
+			for k := i; k < end; k++ {
+				switch toks[k].Text {
+				case "[":
+					depth++
+				case "]":
+					depth--
+					if depth == 0 {
+						close = k
+					}
+				}
+				if close >= 0 {
+					break
+				}
+			}
+			if close < 0 {
+				return ""
+			}
+			base = sliceElemTypeText(base)
+			if base == "" {
+				return ""
+			}
+			i = nextSigIn(toks, close+1, end)
+		case ".":
+			field := nextSigIn(toks, i+1, end)
+			if field < 0 || toks[field].Kind != Ident {
+				return ""
+			}
+			base = strings.TrimSpace(strings.TrimPrefix(base, "*"))
+			if base == "" || base == "any" {
+				return ""
+			}
+			ft := structFieldTypeFromToks(toks, base, toks[field].Text)
+			if ft == "" {
+				return ""
+			}
+			base = ft
+			// 字段必须仍是链的延续（后面还有 . 或 [）或恰好是 body 末尾；
+			// 中间出现其他 token（如 `p.Name + 1`）说明不是纯链式访问，放弃——
+			// 但这层防御交给循环尾部判断：非 . / [ 的后续 token 直接返回 ""。
+			i = nextSigIn(toks, field+1, end)
+		default:
+			// 链中间出现其他 token（复合表达式）：不是纯链式访问，放弃推断。
+			return ""
+		}
+	}
+	// i == -1 表示链已走到 body 末尾（或起点就不是链）。若 recv 后没有 `.`
+	// 也没有 `[`（单变量 body），返回 "" 交给单 token 路径。
+	if i == -1 && first+1 >= end {
+		return ""
+	}
+	return base
+}
+
+// sliceElemTypeText 从 `[]T` / `[N]T` / `[][]T` / `*[]T` 提取元素类型文本。
+// 非 slice/array/指向它们的指针返回 ""。
+func sliceElemTypeText(t string) string {
+	t = strings.TrimSpace(t)
+	t = strings.TrimSpace(strings.TrimPrefix(t, "*"))
+	if !strings.HasPrefix(t, "[") {
+		return ""
+	}
+	depth := 0
+	for i := 0; i < len(t); i++ {
+		switch t[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(t[i+1:])
+			}
 		}
 	}
 	return ""

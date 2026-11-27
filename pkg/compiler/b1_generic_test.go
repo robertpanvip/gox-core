@@ -19,7 +19,7 @@ func TestForEachGetGenericTypeArg(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Row struct { id int; name string }
 func List(props gxscene.Props) *gxscene.Instance {
     rows := gxscene.Get[[]Row](props, "rows")

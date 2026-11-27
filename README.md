@@ -14,7 +14,7 @@
 | **枚举** | `pub enum color { red, green }` | `type Color int` + `const(ColorRed…)` + `String()`/`ParseColor()` |
 | **JSX** | `<div class="box">hi</div>` | `gxscene.Render(gxscene.Template{Ops:[…]})` opcode 模板 + getter |
 | **外部符号** | `http.NewRequest`、`URL` | 原样保留；小写形式 `http.newRequest`、`newRequest` 机械还原 |
-| **集合链式** | `xs.map(f).filter(g)` | `list.List[T].Map(f).Filter(g)`，切片 `[]T` 全局提升 |
+| **集合链式** | `xs.map(f).filter(g)` | `list.List[T].Map(f).Filter(g)`，切片 `[]T` 按需提升 |
 | **is 类型守卫** | `if (x is float64) { … }` | `if v, ok := x.(float64); ok { x := v; … }`（块内 x 窄化为 float64） |
 | **联合类型** | `func f(v int \| string)` | `func f(v any)`（擦除为 any，配合 is 守卫窄化） |
 | **参数默认值** | `func f(x int = 5)` | 调用点补全：`f()` → `f(5)`（TS 语义，区分未传与零值） |
@@ -92,7 +92,7 @@ pub func render(name string) any {
 // 构建：gox build demo.gxpackage main
 
 import (
-    gxscene "github.com/robertpanvip/gox/runtime/scene"
+    gxscene "github.com/robertpanvip/gox-core/runtime/scene"
     "fmt"
 )
 
@@ -146,8 +146,8 @@ scene 核心**不依赖**任何响应式库——`BindReactive(effect)` 接受�
 
 ```gx
 // gox build demo.gximport (
-    gxscene "github.com/robertpanvip/gox/runtime/scene"
-    "github.com/robertpanvip/gox/runtime/signal"
+    gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+    "github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 func main() {
@@ -180,7 +180,7 @@ func main() {
 强类型形态复用了[对象字面量](#11-对象字面量)的「省略类型名 + 期望类型补全 + 校验」机制：JSX 编译期生成裸对象字面量 `Card({title:"x", n:42})`，transpiler 从 `func Card(props CardProps)` 签名推断期望类型 `CardProps`，补全为 `Card(CardProps{...})`，并校验——**字段拼错、类型不符、缺字段都会编译报错（带 GX 坐标）**。
 
 ```gx
-// gox build demo.gximport gxscene "github.com/robertpanvip/gox/runtime/scene"
+// gox build demo.gximport gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 
 type CardProps struct {
     title string
@@ -233,7 +233,7 @@ API：`CompileScene` / `CompileSceneWithModule`（对应默认的 `Compile` / `C
 | `app.render(build)` | 参数：**建树函数** `() => <App/>`（编译为 `func() any`，返回 `*gxscene.Instance`） | 在根 Owner 下建树、画首帧、完成响应式接线 |
 
 ```gx
-// gox build demo.gximport gxapp "github.com/robertpanvip/gox/runtime/app"
+// gox build demo.gximport gxapp "github.com/robertpanvip/gox-core/runtime/app"
 
 app, err := gxapp.open({ title: "Demo", width: 800, height: 600 })
 if err != nil { panic(err) }
@@ -322,7 +322,7 @@ app.close()   // 级联执行 Counter 的 onCleanup
 
 ## 5. 集合链式调用
 
-`[]T` **全局提升**为 `list.List[T]`，直接获得链式方法。依赖 **Go 1.27 泛型方法**，`Map`/`Reduce` 可换型，回调是原生闭包、原样透传。
+`[]T` **按需提升**为 `list.List[T]`，直接获得链式方法。依赖 **Go 1.27 泛型方法**，`Map`/`Reduce` 可换型，回调是原生闭包、原样透传。
 
 ```gx
 nums := []int{1, 2, 3, 4, 5, 6}
@@ -332,7 +332,8 @@ total := nums.filter(even).reduce(0, func(acc, x int) int { return acc + x })
 
 - `List[T]` 与 `[]T` 底层相同，可双向赋值；标准库返回的 `[]T` 也能用方法。
 - **不误伤**：数组 `[3]T`、索引 `a[i]`、切片表达式 `a[1:2]`、`map[K]V`、`Foo[T]` 都不是切片类型形态，不会被提升。
-- 用 `-module` 指定运行时 import 路径（默认 `github.com/robertpanvip/gox` → `.../runtime/list`）。运行时见 [`runtime/list/`](runtime/list/)。
+- 用 `-module` 指定运行时 import 路径（默认 `github.com/robertpanvip/gox-core` → `.../runtime/list`）。运行时见 [`runtime/list/`](runtime/list/)。
+- **按需提升**：同一文件里出现 `.map` / `.filter` / `.reduce` 链式调用时才把 `[]T` 提升为 `list.List[T]`；没有链式调用的文件 `[]T` 原样保留（避免污染函数签名、凭空引入 runtime/list 依赖）。`gx:nocollections` 注释可整文件强制跳过集合变换。
 
 ## 6. is 类型守卫
 
@@ -606,6 +607,25 @@ gox build demo.gx -check -module example.com/app \
     -replace example.com/app=/path/to/runtime     # 转译 + 真实编译检查（错误回投 .gx）
 gox sourcemap demo.gx -o map.json                 # sourcemap
 gox map-lookup -to-go map.json 5 16               # 位置正查
+gox fmt demo.gx                                   # 格式化 JSX（输出到 stdout）
+gox fmt -w ./examples                             # 递归格式化目录内 .gx 并写回
+gox fmt -check demo.gx                            # CI 检查是否已格式化
 gox lsp-map ./examples                            # 项目符号 JSON
 gox lsp                                           # 启动 LSP
+```
+
+## Web Playground（单文件 / 内置 LSP）
+
+`examples/playground` 是一个"用 GX 写 GX"的自举 playground：桌面（skia+GLFW）与网页（web+wasm）共用同一份 GX 场景树。
+
+- **15 个可直接运行的示例**：sig 裸读、事件函数原值、For/getter、Style struct、computed+batch、条件分支、列表增删、enum、模板字符串、对象解构、联合类型、组件 props、EventContext、struct sig、集合链式。左侧切换即重新运行，预览区可点击交互。
+- **单文件双击打开**：`examples/playground/web/playground.html` 内联了 wasm（gzip+base64）与全部前端代码，`file://` 直接打开，无需服务器。
+- **无服务端 LSP**：GX 编译器 + 符号表编译进同一个 wasm，浏览器本地提供实时诊断、补全（`Ctrl+Space`）、悬停符号信息、定义跳转、格式化（`Shift+Alt+F`）。不启动语言服务器、不依赖 `go build`。
+- **严格 TS 7 前端**：`examples/playground/web/src/main.ts` 全程零 `any`；LSP 浮层（诊断面板 / 补全列表 / hover tooltip）由前端渲染，语言逻辑全在 wasm。
+- **构建前强制门禁**：`gen_samples.py` 对每个示例做 `gox fmt -check`、24 行限制、`gox build -check`（真实 Go 编译），全过才生成 `demos/*.go` 运行版包与 `app.gx` 元数据；任一失败立即中止，不写半成品。
+
+```bash
+cd examples/playground/web
+bash build.sh        # 门禁 → 严格 TS → wasm → 单文件 playground.html
+# 直接双击 playground.html，或：python3 -m http.server 8080
 ```

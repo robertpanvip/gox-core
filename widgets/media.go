@@ -12,8 +12,8 @@
 package widgets
 
 import (
-	"github.com/robertpanvip/gox/runtime/canvas"
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/canvas"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // Img 图片组件。

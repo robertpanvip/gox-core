@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // 收集整棵树的所有 Node.ID（含包装节点与项内节点），用于验证 ID 跨帧稳定。

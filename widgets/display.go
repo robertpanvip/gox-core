@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 )
 
 // 数据展示类组件：Text / Heading / Avatar / Stat / Tag / Spinner。
@@ -131,7 +131,7 @@ func Avatar(props gxscene.Props) *gxscene.Instance {
 		attr("align-items", "center"), attr("justify-content", "center"),
 		dynAttr("bg", bgSlot),
 		el("span"), attr("font-size", fmtNum(size*0.4)), attr("weight", "bold"),
-		attr("color", "#07130f"), dynChild(textSlot), closeEl(),
+		attr("color", ThemeOnAccent), dynChild(textSlot), closeEl(),
 		closeEl(),
 	}
 	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
@@ -172,7 +172,7 @@ func Stat(props gxscene.Props) *gxscene.Instance {
 	hasDelta := delta() != ""
 	ops := []gxscene.Op{
 		el("div"), attr("gx-role", "stat"),
-		attr("bg", ThemePanel), attr("border", AppleSeparator), attr("border-width", "1"),
+		attr("bg", ThemePanel), attr("border", ThemeBorder), attr("border-width", HairlineWidth),
 		attr("border-radius", RadiusCard), attr("box-shadow", ShadowCard), attr("padding", "14"),
 		attr("flex-direction", "column"), attr("gap", "4"),
 	}
@@ -224,7 +224,7 @@ func Tag(props gxscene.Props) *gxscene.Instance {
 		attr("border-radius", "6"), attr("padding", "4"),
 		attr("font-size", "12"), attr("weight", "bold"),
 		dynAttr("bg", bgSlot), dynAttr("color", colorSlot),
-		dynAttr("border", borderSlot), attr("border-width", "1"),
+		dynAttr("border", borderSlot), attr("border-width", HairlineWidth),
 		dynChild(textSlot), closeEl(),
 	}
 	return gxscene.Render(gxscene.Template{Ops: ops, N: nSlots},
@@ -238,7 +238,7 @@ func Tag(props gxscene.Props) *gxscene.Instance {
 			if outline() {
 				return toneColor(tone())
 			}
-			return "#07130f"
+			return ThemeOnAccent
 		},
 		func() any {
 			if outline() {
@@ -250,21 +250,26 @@ func Tag(props gxscene.Props) *gxscene.Instance {
 	)
 }
 
-// Spinner 预制加载指示器（旋转环用多层圆点近似，避免依赖 transform 动画）。
-// props: size(直径,默认 24), tone。渲染为一个圆环背景 + 高亮扇区色块。
+// Spinner 预制加载指示器。props: size(直径,默认 24), tone。
+//
+// 用预制矢量 reload 图标（环形箭头）表达"加载中"，替代原先的 ◌ 字符——
+// 字符在不同字体下会渲染成奇怪的小图形，矢量图标跨后端一致且清晰。
+// 外层不再画圆环描边，避免矢量图标与描边叠成两个圆圈。
 func Spinner(props gxscene.Props) *gxscene.Instance {
 	tone := gxscene.Get[string](props, "tone")
 	size := propFloat(props, "size", 24)
-	d := fmtNum(size)
+	toneName := tone()
+	if toneName == "" {
+		toneName = "accent"
+	}
 	ops := []gxscene.Op{
 		el("span"), attr("gx-role", "spinner"),
-		attr("width", d), attr("height", d),
-		attr("border-radius", fmtNum(size/2)),
-		attr("border-width", fmtNum(size/5)),
-		attr("border", ThemeBorder), dynAttr("color", 0),
-		gxscene.Op{Code: gxscene.OpChildText, Arg: "◌"}, closeEl(),
+		attr("width", fmtNum(size)), attr("height", fmtNum(size)),
+		attr("align-items", "center"), attr("justify-content", "center"),
+		gxscene.Op{Code: gxscene.OpComp, Arg: "SpinnerIcon", Slot: 0},
+		closeEl(),
 	}
 	return gxscene.Render(gxscene.Template{Ops: ops, N: 1},
-		func() any { return toneColor(tone()) },
+		func() any { return iconNode("reload", size*0.85, toneName) },
 	)
 }

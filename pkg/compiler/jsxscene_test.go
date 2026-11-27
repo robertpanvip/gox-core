@@ -165,7 +165,7 @@ func TestJSXSceneSignalAttrAndComputed(t *testing.T) {
 	res, err := CompileScene("sig.gx", `package main
 func main() {
 	sig title = "hi"
-	let upper = Signal.computed(func() string { return title() })
+	let upper = Signal.computed(func() string { return title })
 	_ = <a href={title}>{upper}</a>
 }
 `)
@@ -204,7 +204,7 @@ func main() {
 // 由管线第二次 objectlit 从签名补全 Card(CardProps{...}) 并按字段校验。
 func TestJSXSceneTypedPropsContract(t *testing.T) {
 	res, err := CompileScene("typed.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct {
 	title string
 	n     int
@@ -237,7 +237,7 @@ func main() {
 // 无法驱动它，否则 item 变化后子组件静默停在旧值。
 func TestJSXSceneForItemEscapesIntoCompProps(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 type CardProps struct { name string }
 func Card(props CardProps) *gxscene.Instance { return nil }
@@ -269,7 +269,7 @@ func main() {
 // 显式声明响应式字段的用户应享受 item sig 零重建，而非被强制整项重建。
 func TestJSXSceneForItemIntoSignalFieldStaysSignal(t *testing.T) {
 	src := `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 type CardProps struct { sig name string }
 func Card(props CardProps) *gxscene.Instance { return nil }
@@ -297,7 +297,7 @@ func main() {
 // 直接插值（不经过组件边界）仍应走信号化，保持 item sig 零重建。
 func TestJSXSceneForDirectInterpStaysSignal(t *testing.T) {
 	res, err := CompileScene("for-direct.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 func main() {
 	sig users = []User{{1,"Tom"}}
@@ -329,7 +329,7 @@ func TestJSXSceneTypedPropsValidation(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := CompileScene("typed.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type CardProps struct {
 	title string
 	n     int
@@ -350,7 +350,7 @@ func main() { _ = <div>`+c.jsx+`</div> }
 // 老式 gxscene.Props 组件不受影响：仍走 getter-map（保鲜语义）。
 func TestJSXScenePropsComponentUnchanged(t *testing.T) {
 	res, err := CompileScene("old.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 func Card(props gxscene.Props) *gxscene.Instance { return nil }
 func main() {
 	v := "x"
@@ -436,7 +436,7 @@ func main() {
 // render 参数是 item getter func() T，插值 u.name 改写为 u().name 登记依赖。
 func TestJSXSceneFor(t *testing.T) {
 	res, err := CompileScene("for.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 func main() {
 	sig users = []User{{1,"Tom"}}
@@ -465,7 +465,7 @@ func main() {
 // Keyed For 元素类型推断：render 参数无类型注解时，从 each 集合表达式推断元素类型。
 func TestJSXSceneForInferElemType(t *testing.T) {
 	res, err := CompileScene("for.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 func main() {
 	sig users = []User{{1,"Tom"}}
@@ -494,7 +494,7 @@ func main() {
 // 普通变量（非 sig）也应能从 each 推断元素类型，走 bindings 查询路径。
 func TestJSXSceneForInferFromPlainVar(t *testing.T) {
 	res, err := CompileScene("for.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 func main() {
 	users := []User{{1,"Tom"}}
@@ -516,7 +516,7 @@ func main() {
 // 显式类型注解仍优先于推断（回归保证）。
 func TestJSXSceneForExplicitTypeWins(t *testing.T) {
 	res, err := CompileScene("for.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type User struct { id int; name string }
 func main() {
 	sig users = []User{{1,"Tom"}}
@@ -535,7 +535,7 @@ func main() {
 // 事件属性无条件透传为 OpEvent（前端不设白名单、不校验事件名）。
 func TestJSXSceneEventsTranspass(t *testing.T) {
 	res, err := CompileScene("evt.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 func handle() {}
 func main() {
 	_ = <button id="b" onClick={handle} onCustomThing={func(){}} onMouseEnter={handle}>hi</button>
@@ -564,7 +564,7 @@ func main() {
 // 恰好以 on 开头的普通属性（第 3 字符小写）不被误判为事件。
 func TestJSXSceneEventNameNotOverreach(t *testing.T) {
 	res, err := CompileScene("attr.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 func main() {
 	_ = <div once="x" only="y">hi</div>
 }
@@ -585,7 +585,7 @@ func main() {
 // 根标识符 rows 是 map[string][]Row，TypeAt 只给出 key 类型 string → 旧逻辑推成 rune。
 func TestJSXSceneForInferFromIndexedMap(t *testing.T) {
 	res, err := CompileScene("for_indexed.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Row struct { id int; name string }
 func main() {
 	rows := map[string][]Row{"k": {{1, "a"}}}
@@ -616,7 +616,7 @@ func main() {
 // 兜底，退化成 ForGetterOfSignal[any] 编译失败。
 func TestJSXSceneForInferCallWithIndexedArg(t *testing.T) {
 	res, err := CompileScene("for_call_idx.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Row struct { id int; name string }
 func filter(xs []Row) []Row { return xs }
 func main() {
@@ -643,7 +643,7 @@ func main() {
 // 第十二轮 P3-E：each 索引集合是函数参数时也能推断元素类型（Binding.Type 优先于文本回扫）。
 func TestJSXSceneForInferFromIndexedParam(t *testing.T) {
 	res, err := CompileScene("for_param.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Row struct { id int; name string }
 func render(rows map[string][]Row) any {
 	return <ul><For each={rows["k"]} key={(r) => r.id}>{(r) => <li>{r.name}</li>}</For></ul>
@@ -665,7 +665,7 @@ func main(){}
 // 第十二轮 P3-F：each 是 map（非列表）时产出 for-not-list 诊断，不再误导成 []map[...] 编译错误。
 func TestJSXSceneForMapDiagnostic(t *testing.T) {
 	res, err := CompileScene("for_map.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 type Row struct { id int; name string }
 func main() {
 	m := map[string]Row{"k": {1, "a"}}
@@ -702,7 +702,7 @@ func TestJSXMultilineNoStrayNewlineBeforeClose(t *testing.T) {
 		{
 			name: "箭头后换行+JSX跨行+闭括号独立行",
 			src: `package main
-import gxapp "github.com/robertpanvip/gox/runtime/app"
+import gxapp "github.com/robertpanvip/gox-core/runtime/app"
 func main() {
 	app, _ := gxapp.open(nil); _ = app
 	app.render(() =>
@@ -850,7 +850,7 @@ func main() {}
 // 标量相加的类型错误（load(load + 1)）。
 func TestJSXSceneLambdaSignalCompoundRHS(t *testing.T) {
 	res, err := CompileScene("iss2.gx", `package main
-import gxscene "github.com/robertpanvip/gox/runtime/scene"
+import gxscene "github.com/robertpanvip/gox-core/runtime/scene"
 sig load = 42
 sig other = 8
 func main() {
@@ -915,7 +915,7 @@ func foo(any) {}
 		{
 			name: "lambda-body-JSX带尾注",
 			src: `package main
-import gxapp "github.com/robertpanvip/gox/runtime/app"
+import gxapp "github.com/robertpanvip/gox-core/runtime/app"
 func main() {
 	app, _ := gxapp.open(nil)
 	_ = app

@@ -4,8 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	gxscene "github.com/robertpanvip/gox/runtime/scene"
-	"github.com/robertpanvip/gox/runtime/signal"
+	gxscene "github.com/robertpanvip/gox-core/runtime/scene"
+	"github.com/robertpanvip/gox-core/runtime/signal"
 )
 
 // T1.4 验收：替换 ReactiveAdapter 后，For/Branch 仍跑通，且注入的实现确实被调用。

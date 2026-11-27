@@ -13,8 +13,8 @@ import (
 	"encoding/json"
 	"unsafe"
 
-	"github.com/robertpanvip/gox/pkg/compiler"
-	"github.com/robertpanvip/gox/pkg/sourcemap"
+	"github.com/robertpanvip/gox-core/pkg/compiler"
+	"github.com/robertpanvip/gox-core/pkg/sourcemap"
 )
 
 //export gx_version
