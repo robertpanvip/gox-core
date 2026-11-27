@@ -76,7 +76,10 @@ func TestMultipleAppsIsolatedClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	drainExecutor(exec)
-	close(exec.ch)
+	// 必须经 Stop 关闭（先拒新任务再关通道）：widgets 全局闪烁 ticker 仍持有
+	// 本 exec 的全局 poster，裸 close(exec.ch) 会构成 send-on-closed-channel
+	// 竞态（-race 必现，panic 会爆在后续任意测试）。
+	exec.Stop()
 	if staleExecuted.Load() {
 		t.Fatal("已关闭 App 的 Dispatch 闭包不应执行")
 	}
@@ -121,7 +124,7 @@ func TestDispatchAfterCloseUnderConcurrency(t *testing.T) {
 	if got := executed.Load(); got != before {
 		t.Fatalf("关闭后投递的闭包不应执行, before=%d got=%d", before, got)
 	}
-	close(exec.ch)
+	exec.Stop() // 同上：先拒新任务再关通道，杜绝与闪烁 ticker 的投递竞态
 }
 
 // Runtime()/Dispatch() 的基本契约：未注入 Executor 的 App 不允许静默同步执行。
