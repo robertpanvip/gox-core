@@ -25,7 +25,7 @@
 | `runtime/scheduler`                | **gox**（UI 框架） | FrameClock/FrameScheduler，零依赖（只 stdlib）——语言库可复用它做 CLI TUI 调度 |
 | `runtime/scene`、`runtime/canvas`  | **gox**            | Scene/JSX Runtime |
 | `runtime/app`（gxapp）             | **gox**            | App 外壳、Commit Gate、帧调度集成；依赖 signal 的方向是「Gox 依赖 GX」，合法 |
-| `backend/*`（rust/skia/web/gpu）   | **gox-backend**    | 各平台后端实现，已拆至 `github.com/gox-projects/gox-backend` |
+| `rust/`、`skia/`、`web/`、`gpu/`   | **gox-backend**    | 各平台后端实现，已拆至 `github.com/gox-projects/gox-backend` |
 | `examples/*`                       | **gox**            | 依赖后端的平台示例；纯语言 `.gx` 示例在 `gox-core` |
 
 依赖方向规则（CI 可执行）：
