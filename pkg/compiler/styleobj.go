@@ -222,6 +222,16 @@ func styleObjToTokens(raw string, pos Pos, ctx *jsxSceneCtx) ([]Token, bool) {
 				allOK = false
 				break
 			}
+		} else if fname == "Transition" && isObjectLitText(valText) {
+			// transition 对象形式：编译期 lower 成 CSS 简写字符串（如
+			// "opacity 300ms ease, transform 200ms linear"），与手写字符串
+			// 写法字节一致，后端/协议零改动。只接受已支持的属性与缓动。
+			lowered, ok := transitionObjLower(valText, pos, ctx, toks[keyIdx].Pos)
+			if !ok {
+				allOK = false
+				break
+			}
+			valToks = []Token{styleTokString(strconv.Quote(lowered), pos)}
 		} else {
 			valToks = styleScalarTokens(valText, pos, ctx)
 		}
@@ -287,4 +297,200 @@ func styleTokIdent(s string, p Pos) Token { return Token{Kind: Ident, Text: s, P
 func styleTokOp(s string, p Pos) Token    { return Token{Kind: Operator, Text: s, Pos: p, IsGen: true} }
 func styleTokString(s string, p Pos) Token {
 	return Token{Kind: String, Text: s, Pos: p, IsGen: true}
+}
+
+// ---------- transition 对象形式 → CSS 简写字符串的编译期 lower ----------
+//
+// GX 写法：
+//
+//	transition: {
+//	    opacity:   { duration: 300, easing: "ease" },
+//	    transform: { duration: "200ms", easing: "linear" },
+//	}
+//
+// lower 成与手写字符串写法字节一致的产物：
+//
+//	Transition: "opacity 300ms ease, transform 200ms linear"
+//
+// 设计边界（只写当前已支持的，不扩展）：
+//   - 属性名走 camel→kebab，只做合法性校验，不做白名单——后端支持的属性集合较宽
+//     （数值/颜色，见 docs/STYLE.md §3），白名单易漏且与字符串写法不一致。
+//   - "all" 明确不支持（后端 parse_transition 里 all 被跳过），报诊断。
+//   - duration：数字字面量按毫秒（300 → "300ms"）；带引号字符串原样透传（"0.4s"）。
+//   - easing：仅 linear/ease/ease-in/ease-out/ease-in-out 五档，缺省 ease。
+//   - 非法/未知字段报诊断并整体放弃，不产出半成品（与 styleObjToTokens 同风格）。
+
+// transitionEasings 是 transition 对象形式接受的缓动白名单，与后端 parse_transition 对齐。
+var transitionEasings = map[string]bool{
+	"linear": true, "ease": true, "ease-in": true, "ease-out": true, "ease-in-out": true,
+}
+
+// transitionTopColon 在 [start,limit) 内找第一个顶层 ':'（跳过括号/方括号/花括号内部）。
+func transitionTopColon(toks []Token, start, limit int) int {
+	depth := 0
+	for k := start; k < limit && k < len(toks); k++ {
+		switch toks[k].Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			if depth > 0 {
+				depth--
+			}
+		case ":":
+			if depth == 0 {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
+// transitionObjLower 把 transition 对象字面量 lower 成 CSS transition 简写字符串。
+func transitionObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (string, bool) {
+	t := strings.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
+		ctx.report("style-transition-object", keyPos, "transition 对象形式须写成 { property: { duration, easing } }")
+		return "", false
+	}
+	inner := t[1 : len(t)-1]
+	toks := New(inner).AllTokens()
+	if len(toks) > 0 && toks[len(toks)-1].Kind == EOF {
+		toks = toks[:len(toks)-1]
+	}
+	segs := splitTopLevelSegs(toks, 0, len(toks))
+	var parts []string
+	for _, seg := range segs {
+		if nextSigIn(toks, seg[0], seg[1]) < 0 {
+			continue // 尾部逗号产生的空段
+		}
+		colon := transitionTopColon(toks, seg[0], seg[1])
+		ki := nextSigIn(toks, seg[0], colon)
+		if colon < 0 || ki < 0 || (toks[ki].Kind != Ident && toks[ki].Kind != String) {
+			ctx.report("style-transition-object", keyPos, "transition 对象项须写成 property: { duration, easing }")
+			return "", false
+		}
+		prop := toks[ki].Text
+		if u, err := strconv.Unquote(prop); err == nil {
+			prop = u
+		}
+		prop = styleKeyCamelToKebab(strings.TrimSpace(prop))
+		if prop == "" {
+			ctx.report("style-transition-object", keyPos, "transition 属性名不能为空")
+			return "", false
+		}
+		if prop == "all" {
+			ctx.report("style-transition-object", keyPos, "transition 暂不支持 all，请写出具体属性名")
+			return "", false
+		}
+		valFrom := nextSigIn(toks, colon+1, seg[1])
+		if valFrom < 0 {
+			ctx.report("style-transition-object", keyPos, "transition 属性 "+prop+" 缺少配置对象")
+			return "", false
+		}
+		dur, eas, ok := transitionSpecLower(exprText(toks, valFrom, seg[1]), prop, ctx, keyPos)
+		if !ok {
+			return "", false
+		}
+		parts = append(parts, prop+" "+dur+" "+eas)
+	}
+	if len(parts) == 0 {
+		ctx.report("style-transition-object", keyPos, "transition 对象至少须有一个属性项")
+		return "", false
+	}
+	return strings.Join(parts, ", "), true
+}
+
+// transitionSpecLower 解析单个属性的 { duration, easing } 配置对象，返回 (duration, easing)。
+func transitionSpecLower(raw, prop string, ctx *jsxSceneCtx, keyPos Pos) (string, string, bool) {
+	t := strings.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
+		ctx.report("style-transition-object", keyPos, "transition."+prop+" 的配置须为 { duration, easing } 对象")
+		return "", "", false
+	}
+	inner := t[1 : len(t)-1]
+	toks := New(inner).AllTokens()
+	if len(toks) > 0 && toks[len(toks)-1].Kind == EOF {
+		toks = toks[:len(toks)-1]
+	}
+	segs := splitTopLevelSegs(toks, 0, len(toks))
+	var dur, eas string
+	for _, seg := range segs {
+		if nextSigIn(toks, seg[0], seg[1]) < 0 {
+			continue
+		}
+		colon := transitionTopColon(toks, seg[0], seg[1])
+		ki, vi := nextSigIn(toks, seg[0], colon), nextSigIn(toks, colon+1, seg[1])
+		if colon < 0 || ki < 0 || vi < 0 {
+			ctx.report("style-transition-field", keyPos, "transition."+prop+" 配置项须写成 key: value")
+			return "", "", false
+		}
+		key := toks[ki].Text
+		if u, err := strconv.Unquote(key); err == nil {
+			key = u
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val := exprText(toks, vi, seg[1])
+		switch key {
+		case "duration":
+			if dur == "" {
+				d, ok := transitionDuration(val)
+				if !ok {
+					ctx.report("style-transition-field", keyPos, "transition."+prop+" 的 duration 须为正数（毫秒）或时长字符串（如 \"0.4s\"）")
+					return "", "", false
+				}
+				dur = d
+			}
+		case "easing":
+			if eas == "" {
+				e, ok := transitionEasing(val)
+				if !ok {
+					ctx.report("style-transition-field", keyPos, "transition."+prop+" 的 easing 仅支持 linear/ease/ease-in/ease-out/ease-in-out")
+					return "", "", false
+				}
+				eas = e
+			}
+		default:
+			ctx.report("style-transition-field", keyPos, "transition."+prop+" 未知字段 "+key+"（仅支持 duration/easing）")
+			return "", "", false
+		}
+	}
+	if dur == "" {
+		ctx.report("style-transition-field", keyPos, "transition."+prop+" 缺少 duration")
+		return "", "", false
+	}
+	if eas == "" {
+		eas = "ease" // 与 CSS transition 缺省一致
+	}
+	return dur, eas, true
+}
+
+// transitionDuration 把 duration 值转成 CSS 时长字符串：数字字面量按毫秒，字符串原样透传。
+func transitionDuration(val string) (string, bool) {
+	v := strings.TrimSpace(val)
+	if isNumericLiteral(v) {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			return "", false
+		}
+		return strconv.FormatFloat(f, 'g', -1, 64) + "ms", true
+	}
+	if u, err := strconv.Unquote(v); err == nil {
+		if strings.TrimSpace(u) != "" {
+			return u, true
+		}
+	}
+	return "", false
+}
+
+// transitionEasing 把 easing 值转成五档白名单之一。
+func transitionEasing(val string) (string, bool) {
+	v := strings.TrimSpace(val)
+	if u, err := strconv.Unquote(v); err == nil {
+		v = u
+	}
+	v = strings.ToLower(strings.TrimSpace(v))
+	if transitionEasings[v] {
+		return v, true
+	}
+	return "", false
 }
