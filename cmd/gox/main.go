@@ -29,6 +29,14 @@ func main() {
 	switch cmd {
 	case "build":
 		err = cmdBuild(args)
+	case "init":
+		err = cmdInit(args)
+	case "run":
+		err = cmdRun(args)
+	case "mod":
+		err = cmdMod(args)
+	case "version":
+		err = cmdVersion(args)
 	case "check":
 		err = cmdCheck(args)
 	case "union", "typeguard", "jsx", "pub", "enum", "collections", "external", "all":
@@ -62,6 +70,15 @@ func usage() {
 	fmt.Println(`gox — GX（编译到 Go）命令行工具
 
 用法:
+  gox init [dir] [-module path] [-runtime version] [-replace dir] [-force]
+       初始化项目骨架（go.mod + main.gx），go.mod 自动声明自有运行时依赖
+  gox run <file.gx> [args...] [-root dir] [-module path] [-prefer gx|go]
+       转译并直接 go run；产物放临时目录，不污染源码树
+  gox mod init [dir] [-module path] [-version vX.Y.Z] [-force]
+       仅生成 go.mod（已有 .gx 源码的项目）
+  gox mod upgrade [version] [-dir dir] [-no-tidy]
+       更新 go.mod 中 gox-core 的运行时版本；第三方依赖请用 go get
+  gox version                                    输出版本号
   gox build <file.gx> [-o out.go] [-module path] [-check] [-replace old=new] [-root dir] [-prefer gx|go]
        -module   集合/JSX 运行时的 module 路径（默认 github.com/robertpanvip/gox-core）
        -check    转译后执行真实 go build，并把错误回投到 .gx 位置

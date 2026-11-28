@@ -6,6 +6,40 @@
 >
 > **书写约定核心：声明用 `pub` 显式导出；标识符按 Go 真实拼写书写，全大写缩写（如 `URL`）直接写大写、原样保留。** 小写形式兼容旧写法、机械还原，无需类型推导、无需读取第三方包符号表。
 
+## 快速开始
+
+前置要求：**Go 1.27+**。GoX 是 Go 的转译层，产物最终由 Go 工具链编译，因此本机必须装 Go——这是 prerequisite，不是 gox 打包的内容。
+
+**安装 gox**（Linux / macOS 一键脚本，会校验 SHA256）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.sh | bash
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.ps1 | iex
+```
+
+或用 Go 原生方式安装：
+
+```bash
+go install github.com/robertpanvip/gox-core/cmd/gox@latest
+```
+
+**三步跑起来**：
+
+```bash
+gox init myapp
+cd myapp
+gox run main.gx
+```
+
+`gox init` 生成 `go.mod`（自动声明自有运行时依赖 `github.com/robertpanvip/gox-core`）和最小 `main.gx`；`gox run` 转译后直接 `go run`，产物放临时目录、不污染源码树。第三方依赖照常 `go get`；升级自有运行时用 `gox mod upgrade vX.Y.Z`。
+
+依赖策略、分发设计与 IDE 接入详见 [开发者分发设计](docs/DEVELOPER_DISTRIBUTION.md)。
+
 ## 特性速览
 
 | 特性 | GX 写法 | 生成的 Go |
