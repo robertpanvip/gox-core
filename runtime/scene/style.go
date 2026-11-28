@@ -87,9 +87,10 @@ type Style struct {
 	LetterSpacing  StyleValue `gx:"letter-spacing"`
 	ZIndex         StyleValue `gx:"z-index"`
 	Cursor         StyleValue `gx:"cursor"`
-	// Animation 是三端统一的声明式动画（受限内置动画，如 "blink 1.06s infinite"）。
-	// 标量字符串，不是子表；各后端按 AnimationSpec 采样，无需宿主 @keyframes。
-	Animation      StyleValue `gx:"animation"`
+	// Animation 是三端统一的声明式动画，静态 struct（含内嵌关键帧）。
+	// Name="blink" 走内置周期动画；Keyframes 非空走自定义关键帧动画。
+	// Props() 展平成 "animation" 简写串 + "animation-keyframes" JSON 串。
+	Animation      *AnimationStyle `gx:"animation"`
 	// PointerEvents 让 Web 端光标等覆盖层穿透点击（"none"）；Skia/Rust 命中测试
 	// 由后端自有 HitBox 决定，此键对二者无副作用，仅作语义透传。
 	PointerEvents  StyleValue `gx:"pointer-events"`
@@ -266,6 +267,7 @@ func (s Style) Validate() error {
 // ---------- 展平 ----------
 
 // forEachScalar 遍历所有非空的普通属性字段，供 Props / Flatten / encodeSubStyle 复用。
+// animation 字段是静态 struct，不在此处当标量遍历，由专门分支处理。
 func (s Style) forEachScalar(fn func(key, val string)) {
 	fields, _ := styleMeta()
 	v := reflect.ValueOf(s)
@@ -273,10 +275,26 @@ func (s Style) forEachScalar(fn func(key, val string)) {
 		if f.pseudo != "" || f.element {
 			continue
 		}
+		if f.key == "animation" {
+			continue // 静态 struct，由 emitAnimation 处理
+		}
 		sv, _ := v.Field(f.index).Interface().(StyleValue)
 		if sv != "" {
 			fn(f.key, sv)
 		}
+	}
+}
+
+// emitAnimation 把 animation 静态结构展开成后端协议键。供 Props / Flatten 复用。
+func (s Style) emitAnimation(fn func(key, val string)) {
+	if s.Animation == nil {
+		return
+	}
+	if str := s.Animation.animationString(); str != "" {
+		fn("animation", str)
+	}
+	if kf := s.Animation.keyframesJSON(); kf != "" {
+		fn(PropAnimationKeyframes, kf)
 	}
 }
 
@@ -322,11 +340,15 @@ func (s Style) Props() Props {
 			}
 			continue
 		}
+		if f.key == "animation" {
+			continue
+		}
 		sv, _ := v.Field(f.index).Interface().(StyleValue)
 		if sv != "" {
 			p[f.key] = sv
 		}
 	}
+	s.emitAnimation(func(k, v string) { p[k] = v })
 	return p
 }
 
@@ -335,12 +357,14 @@ func (s Style) Props() Props {
 func (s Style) Flatten(states ...string) Props {
 	out := Props{}
 	s.forEachScalar(func(k, v string) { out[k] = v })
+	s.emitAnimation(func(k, v string) { out[k] = v })
 	for _, st := range states {
 		sub := s.pseudoPtr(normalizeStylePseudo(st))
 		if sub == nil {
 			continue
 		}
 		sub.forEachScalar(func(k, v string) { out[k] = v })
+		sub.emitAnimation(func(k, v string) { out[k] = v })
 	}
 	return out
 }
@@ -434,6 +458,15 @@ func setStyleValue(s *Style, key string, val any) error {
 			return fmt.Errorf("style: 伪状态/伪元素 %q 的值必须是样式表: %w", key, err)
 		}
 		dst.Set(reflect.ValueOf(&sub))
+		return nil
+	}
+	// animation 是静态 struct：动态构造时接受对象（含 keyframes）或简写字符串。
+	if f.key == "animation" {
+		spec, err := animationStyleFromAny(val)
+		if err != nil {
+			return fmt.Errorf("style: 属性 animation 解析失败: %w", err)
+		}
+		dst.Set(reflect.ValueOf(&spec))
 		return nil
 	}
 	sv, ok := scalarToStyleValue(val)

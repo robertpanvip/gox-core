@@ -206,9 +206,10 @@ func TestTransitionStringWriteUnchanged(t *testing.T) {
 	}
 }
 
-// ---------- animation 对象形式 ----------
+// ---------- animation 静态 struct（含内嵌关键帧） ----------
 
 func TestAnimationObjByteIdenticalToString(t *testing.T) {
+	// 对象写法与字符串写法必须产出等价的 AnimationStyle 静态字面量。
 	cases := []struct {
 		name string
 		obj  string
@@ -219,25 +220,25 @@ func TestAnimationObjByteIdenticalToString(t *testing.T) {
 			name: "数字时长无限循环",
 			obj:  `style={{ animation: { name: "blink", duration: 1060, iterations: -1 } }}`,
 			str:  `style={{ animation: "blink 1060ms infinite" }}`,
-			want: `Animation:"blink 1060ms infinite"`,
+			want: `Animation:&gxscene.AnimationStyle{Name:"blink",Duration:"1060ms",Iterations:"infinite",}`,
 		},
 		{
 			name: "字符串时长有限次数",
 			obj:  `style={{ animation: { name: "blink", duration: "1.06s", iterations: 3 } }}`,
 			str:  `style={{ animation: "blink 1.06s 3" }}`,
-			want: `Animation:"blink 1.06s 3"`,
+			want: `Animation:&gxscene.AnimationStyle{Name:"blink",Duration:"1.06s",Iterations:"3",}`,
 		},
 		{
 			name: "缺省迭代为infinite",
 			obj:  `style={{ animation: { name: "blink", duration: 500 } }}`,
 			str:  `style={{ animation: "blink 500ms infinite" }}`,
-			want: `Animation:"blink 500ms infinite"`,
+			want: `Animation:&gxscene.AnimationStyle{Name:"blink",Duration:"500ms",Iterations:"infinite",}`,
 		},
 		{
 			name: "iterations写infinite字符串",
 			obj:  `style={{ animation: { name: "blink", duration: 200, iterations: "infinite" } }}`,
 			str:  `style={{ animation: "blink 200ms infinite" }}`,
-			want: `Animation:"blink 200ms infinite"`,
+			want: `Animation:&gxscene.AnimationStyle{Name:"blink",Duration:"200ms",Iterations:"infinite",}`,
 		},
 	}
 	for _, c := range cases {
@@ -264,13 +265,62 @@ func extractAnimationField(src string) string {
 		return ""
 	}
 	rest := src[i:]
-	if j := strings.Index(rest[10:], `"`); j >= 0 {
-		end := 10 + j
-		if k := strings.Index(rest[end+1:], `"`); k >= 0 {
-			return rest[:end+1+k+1]
+	// 花括号平衡提取：从第一个 '{' 起，数到匹配的 '}'，含结构内所有嵌套。
+	b := strings.Index(rest, "{")
+	if b < 0 {
+		return rest
+	}
+	depth := 0
+	for k := b; k < len(rest); k++ {
+		switch rest[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:k+1]
+			}
 		}
 	}
 	return rest
+}
+
+func TestAnimationKeyframesStruct(t *testing.T) {
+	// 核心：内嵌 keyframes 编译成静态 AnimationStyle{Keyframes: []gxscene.Keyframe{...}}。
+	res := compileStyleJSX(t, `style={{ animation: { duration: 1000, iterations: -1, keyframes: [
+		{ offset: 0, props: { opacity: 0, transform: "translateX(-100%)" } },
+		{ offset: 0.5, props: { opacity: 0.5 } },
+		{ offset: 1, props: { opacity: 1, transform: "translateX(0)" } },
+	] } }}`)
+	assertNoDiag(t, res)
+	for _, want := range []string{
+		`Animation:&gxscene.AnimationStyle{`,
+		`Duration:"1000ms"`,
+		`Iterations:"infinite"`,
+		`Keyframes:[]gxscene.Keyframe{`,
+		`gxscene.Keyframe{Offset:"0",Props:gxscene.Style{Opacity:"0",Transform:"translateX(-100%)",},}`,
+		`gxscene.Keyframe{Offset:"0.5",Props:gxscene.Style{Opacity:"0.5",},}`,
+		`gxscene.Keyframe{Offset:"1",Props:gxscene.Style{Opacity:"1",Transform:"translateX(0)",},}`,
+	} {
+		if !strings.Contains(res.GoSource, want) {
+			t.Errorf("产物缺少 %q\n%s", want, res.GoSource)
+		}
+	}
+	// 自定义关键帧动画不产 Name 字段。
+	if strings.Contains(res.GoSource, `Name:`) {
+		t.Errorf("自定义关键帧动画不应有 Name 字段\n%s", res.GoSource)
+	}
+}
+
+func TestAnimationKeyframesCamelProps(t *testing.T) {
+	// 关键帧 props 里的属性同样走 camel→kebab→PascalCase 静态字段映射。
+	res := compileStyleJSX(t, `style={{ animation: { duration: 500, keyframes: [{ offset: 0, props: { fontSize: 12, borderRadius: "4px" } }] } }}`)
+	assertNoDiag(t, res)
+	for _, want := range []string{`FontSize:"12"`, `BorderRadius:"4px"`} {
+		if !strings.Contains(res.GoSource, want) {
+			t.Errorf("产物缺少 %q\n%s", want, res.GoSource)
+		}
+	}
 }
 
 func TestAnimationObjInvalidDiagnostics(t *testing.T) {
@@ -279,27 +329,22 @@ func TestAnimationObjInvalidDiagnostics(t *testing.T) {
 		expr string
 		code string
 	}{
-		{"未知name", `style={{ animation: { name: "fade", duration: 300 } }}`, "style-animation-field"},
-		{"缺少name", `style={{ animation: { duration: 300 } }}`, "style-animation-field"},
 		{"缺少duration", `style={{ animation: { name: "blink" } }}`, "style-animation-field"},
 		{"duration为零", `style={{ animation: { name: "blink", duration: 0 } }}`, "style-animation-field"},
 		{"迭代为零", `style={{ animation: { name: "blink", duration: 300, iterations: 0 } }}`, "style-animation-field"},
 		{"迭代小数", `style={{ animation: { name: "blink", duration: 300, iterations: 1.5 } }}`, "style-animation-field"},
 		{"未知字段", `style={{ animation: { name: "blink", duration: 300, delay: 100 } }}`, "style-animation-field"},
-		{"非对象", `style={{ animation: 300 }}`, ""}, // 数字标量仍合法（旧写法）
+		{"keyframes非数组", `style={{ animation: { duration: 300, keyframes: 123 } }}`, "style-animation-keyframes"},
+		{"关键帧非对象", `style={{ animation: { duration: 300, keyframes: [123] } }}`, "style-animation-keyframes"},
+		{"关键帧缺offset", `style={{ animation: { duration: 300, keyframes: [{ props: { opacity: 0 } }] } }}`, "style-animation-keyframes"},
+		{"关键帧非法offset", `style={{ animation: { duration: 300, keyframes: [{ offset: "abc", props: {} }] } }}`, "style-animation-keyframes"},
+		{"关键帧props非对象", `style={{ animation: { duration: 300, keyframes: [{ offset: 0, props: 1 }] } }}`, "style-animation-keyframes"},
+		{"关键帧未知字段", `style={{ animation: { duration: 300, keyframes: [{ offset: 0, bogus: 1 }] } }}`, "style-animation-keyframes"},
+		{"空keyframes", `style={{ animation: { duration: 300, keyframes: [] } }}`, "style-animation-keyframes"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			res := compileStyleJSX(t, c.expr)
-			if c.code == "" {
-				// 数字标量走 old path，不报对象相关诊断（可能产出非法 Go 但不应报 style-animation-*）
-				for _, d := range res.Analysis.Diagnostics() {
-					if strings.HasPrefix(d.Code, "style-animation") {
-						t.Errorf("数字标量不应报对象诊断，得到 %v", res.Analysis.Diagnostics())
-					}
-				}
-				return
-			}
 			codes := transitionDiagCodes(res)
 			if !codes[c.code] {
 				t.Errorf("应报 %s，得到 %v\n%s", c.code, codes, res.GoSource)
@@ -313,7 +358,7 @@ func TestAnimationObjCoexists(t *testing.T) {
 	assertNoDiag(t, res)
 	for _, want := range []string{
 		`Bg:"#fff"`,
-		`Animation:"blink 1060ms infinite"`,
+		`Animation:&gxscene.AnimationStyle{`,
 		`Transition:"opacity 300ms ease"`,
 	} {
 		if !strings.Contains(res.GoSource, want) {
@@ -325,7 +370,7 @@ func TestAnimationObjCoexists(t *testing.T) {
 func TestAnimationStringWriteUnchanged(t *testing.T) {
 	res := compileStyleJSX(t, `style={{ animation: "blink 1.06s infinite" }}`)
 	assertNoDiag(t, res)
-	if !strings.Contains(res.GoSource, `Animation:"blink 1.06s infinite"`) {
-		t.Errorf("字符串写法被破坏\n%s", res.GoSource)
+	if !strings.Contains(res.GoSource, `Animation:&gxscene.AnimationStyle{Name:"blink",Duration:"1.06s",Iterations:"infinite",}`) {
+		t.Errorf("字符串写法未正确 lower 成静态结构\n%s", res.GoSource)
 	}
 }

@@ -232,15 +232,19 @@ func styleObjToTokens(raw string, pos Pos, ctx *jsxSceneCtx) ([]Token, bool) {
 				break
 			}
 			valToks = []Token{styleTokString(strconv.Quote(lowered), pos)}
-		} else if fname == "Animation" && isObjectLitText(valText) {
-			// animation 对象形式：编译期 lower 成受限内置协议字符串（如
-			// "blink 1060ms infinite"），与手写字符串写法字节一致。
-			lowered, ok := animationObjLower(valText, pos, ctx, toks[keyIdx].Pos)
+		} else if fname == "Animation" {
+			// animation 静态结构：对象形式（含内嵌 keyframes）与字符串简写形式
+			// 都 lower 成 &gxscene.AnimationStyle{...} 静态字面量，字段编译期校验。
+			var ok bool
+			if isObjectLitText(valText) {
+				valToks, ok = animationObjTokens(valText, pos, ctx, toks[keyIdx].Pos)
+			} else {
+				valToks, ok = animationStringTokens(valText, pos, ctx, toks[keyIdx].Pos)
+			}
 			if !ok {
 				allOK = false
 				break
 			}
-			valToks = []Token{styleTokString(strconv.Quote(lowered), pos)}
 		} else {
 			valToks = styleScalarTokens(valText, pos, ctx)
 		}
@@ -504,28 +508,34 @@ func transitionEasing(val string) (string, bool) {
 	return "", false
 }
 
-// ---------- animation 对象形式 → 受限内置协议的编译期 lower ----------
+// ---------- animation 静态结构 → &gxscene.AnimationStyle{...} 的编译期 lower ----------
 //
-// GX 写法：
+// GX 写法（对象，含内嵌关键帧）：
 //
-//	animation: { name: "blink", duration: 1060, iterations: -1 }
+//	animation: { duration: 1000, iterations: -1, keyframes: [
+//	    { offset: 0, props: { opacity: 0, transform: "translateX(-100%)" } },
+//	    { offset: 1, props: { opacity: 1 } },
+//	] }
 //
-// lower 成与手写字符串写法字节一致的产物：
+// 编译成静态字面量（字段编译期校验，拼错即报错）：
 //
-//	Animation: "blink 1060ms infinite"
+//	Animation: &gxscene.AnimationStyle{
+//	    Duration: "1000ms", Iterations: "infinite",
+//	    Keyframes: []gxscene.Keyframe{
+//	        {Offset:"0", Props: gxscene.Style{Opacity:"0", Transform:"translateX(-100%)"}},
+//	        ...
+//	    },
+//	}
 //
-// 设计边界（与 goxscene.AnimationSpec / 后端 parse_animation 严格对齐）：
-//   - name：当前只支持内置 "blink"，其余报诊断（受限内置动画，非任意 @keyframes）。
-//   - duration：数字按毫秒（1060 → "1060ms"）；带引号字符串原样透传（"1.06s"）。
-//   - iterations：-1 或 "infinite" → "infinite"；正整数 → 该数字。缺省 infinite。
-//   - 未知字段/非法值报诊断并整体放弃。
+// 字符串简写写法 "blink 1.06s infinite" 也 lower 成同结构（Name/Duration/Iterations），
+// 两种写法产出等价。后端 Props() 展平成字符串协议，ABI 零改动。
 
-// animationObjLower 把 animation 对象字面量 lower 成受限协议字符串。
-func animationObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (string, bool) {
+// animationObjTokens 把 animation 对象字面量 lower 成 &gxscene.AnimationStyle{...} token 序列。
+func animationObjTokens(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) ([]Token, bool) {
 	t := strings.TrimSpace(raw)
 	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
-		ctx.report("style-animation-object", keyPos, "animation 对象形式须写成 { name, duration, iterations }")
-		return "", false
+		ctx.report("style-animation-object", keyPos, "animation 须写成对象或简写字符串")
+		return nil, false
 	}
 	inner := t[1 : len(t)-1]
 	toks := New(inner).AllTokens()
@@ -534,6 +544,8 @@ func animationObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (strin
 	}
 	segs := splitTopLevelSegs(toks, 0, len(toks))
 	var name, dur, iter string
+	var keyframesToks []Token
+	hasKeyframes := false
 	for _, seg := range segs {
 		if nextSigIn(toks, seg[0], seg[1]) < 0 {
 			continue
@@ -542,7 +554,7 @@ func animationObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (strin
 		ki, vi := nextSigIn(toks, seg[0], colon), nextSigIn(toks, colon+1, seg[1])
 		if colon < 0 || ki < 0 || vi < 0 {
 			ctx.report("style-animation-field", keyPos, "animation 配置项须写成 key: value")
-			return "", false
+			return nil, false
 		}
 		key := toks[ki].Text
 		if u, err := strconv.Unquote(key); err == nil {
@@ -553,42 +565,233 @@ func animationObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (strin
 		switch key {
 		case "name":
 			v, ok := unquoteIdent(val)
-			if !ok || v != "blink" {
-				ctx.report("style-animation-field", keyPos, "animation 当前仅支持内置 name \"blink\"")
-				return "", false
+			if !ok {
+				ctx.report("style-animation-field", keyPos, "animation 的 name 须为字符串")
+				return nil, false
 			}
 			name = v
 		case "duration":
 			d, ok := transitionDuration(val)
 			if !ok {
-				ctx.report("style-animation-field", keyPos, "animation 的 duration 须为正时长（如 1060 或 \"1.06s\"）")
-				return "", false
+				ctx.report("style-animation-field", keyPos, "animation 的 duration 须为正时长（如 1000 或 \"1s\"）")
+				return nil, false
 			}
 			dur = d
 		case "iterations":
 			i, ok := animationIterations(val)
 			if !ok {
-				ctx.report("style-animation-field", keyPos, "animation 的 iterations 须为 -1（infinite）或正整数")
-				return "", false
+				ctx.report("style-animation-field", keyPos, "animation 的 iterations 须为 -1/infinite 或正整数")
+				return nil, false
 			}
 			iter = i
+		case "keyframes":
+			kfs, ok := keyframeArrayTokens(val, pos, ctx, keyPos)
+			if !ok {
+				return nil, false
+			}
+			keyframesToks = kfs
+			hasKeyframes = true
 		default:
-			ctx.report("style-animation-field", keyPos, "animation 未知字段 "+key+"（仅支持 name/duration/iterations）")
-			return "", false
+			ctx.report("style-animation-field", keyPos, "animation 未知字段 "+key+"（仅 name/duration/iterations/keyframes）")
+			return nil, false
 		}
 	}
-	if name == "" {
-		ctx.report("style-animation-field", keyPos, "animation 缺少 name")
-		return "", false
+	if name == "" && !hasKeyframes {
+		ctx.report("style-animation-field", keyPos, "animation 缺少 name（自定义关键帧动画可省略）")
+		return nil, false
 	}
 	if dur == "" {
 		ctx.report("style-animation-field", keyPos, "animation 缺少 duration")
-		return "", false
+		return nil, false
 	}
 	if iter == "" {
 		iter = "infinite"
 	}
-	return name + " " + dur + " " + iter, true
+	return buildAnimationStyleTokens(name, dur, iter, keyframesToks, pos), true
+}
+
+// animationStringTokens 把字符串简写 "blink 1.06s infinite" lower 成静态结构字面量。
+func animationStringTokens(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) ([]Token, bool) {
+	v := strings.TrimSpace(raw)
+	if u, err := strconv.Unquote(v); err == nil {
+		v = u
+	}
+	fields := strings.Fields(strings.ToLower(v))
+	if len(fields) == 0 {
+		ctx.report("style-animation-string", keyPos, "animation 简写串不能为空")
+		return nil, false
+	}
+	name := fields[0]
+	var dur, iter string
+	var ints []string
+	for _, tok := range fields[1:] {
+		if tok == "infinite" {
+			iter = "infinite"
+			continue
+		}
+		// 带 s/ms 后缀的是时长（字符串已被整串 unquote）。
+		if strings.HasSuffix(tok, "ms") || strings.HasSuffix(tok, "s") {
+			unit := strings.TrimSuffix(strings.TrimSuffix(tok, "ms"), "s")
+			if _, err := strconv.ParseFloat(unit, 64); err == nil {
+				if dur == "" {
+					dur = tok
+				}
+				continue
+			}
+		}
+		// 纯整数先暂存：dur 已有则当迭代次数，否则兜底为时长。
+		if _, err := strconv.Atoi(tok); err == nil {
+			ints = append(ints, tok)
+		}
+	}
+	for _, it := range ints {
+		if dur == "" {
+			dur = it
+		} else if iter == "" {
+			iter = it
+		}
+	}
+	if dur == "" {
+		ctx.report("style-animation-string", keyPos, "animation 简写串缺少时长")
+		return nil, false
+	}
+	return buildAnimationStyleTokens(name, dur, iter, nil, pos), true
+}
+
+// buildAnimationStyleTokens 组装 &gxscene.AnimationStyle{...} token 序列。
+func buildAnimationStyleTokens(name, dur, iter string, keyframesToks []Token, pos Pos) []Token {
+	out := []Token{
+		styleTokOp("&", pos), styleTokIdent("gxscene", pos), styleTokOp(".", pos),
+		styleTokIdent("AnimationStyle", pos), styleTokOp("{", pos),
+	}
+	addField := func(field, val string) {
+		out = append(out, styleTokIdent(field, pos), styleTokOp(":", pos), styleTokString(strconv.Quote(val), pos), styleTokOp(",", pos))
+	}
+	if name != "" {
+		addField("Name", name)
+	}
+	addField("Duration", dur)
+	addField("Iterations", iter)
+	if len(keyframesToks) > 0 {
+		out = append(out, styleTokIdent("Keyframes", pos), styleTokOp(":", pos))
+		out = append(out, keyframesToks...)
+		out = append(out, styleTokOp(",", pos))
+	}
+	out = append(out, styleTokOp("}", pos))
+	return out
+}
+
+// keyframeArrayTokens 把 keyframes 数组字面量 lower 成 []gxscene.Keyframe{...}。
+func keyframeArrayTokens(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) ([]Token, bool) {
+	t := strings.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '[' || t[len(t)-1] != ']' {
+		ctx.report("style-animation-keyframes", keyPos, "keyframes 须写成数组 [{ offset, props }, ...]")
+		return nil, false
+	}
+	inner := t[1 : len(t)-1]
+	toks := New(inner).AllTokens()
+	if len(toks) > 0 && toks[len(toks)-1].Kind == EOF {
+		toks = toks[:len(toks)-1]
+	}
+	segs := splitTopLevelSegs(toks, 0, len(toks))
+	out := []Token{styleTokIdent("[]", pos), styleTokIdent("gxscene", pos), styleTokOp(".", pos),
+		styleTokIdent("Keyframe", pos), styleTokOp("{", pos)}
+	count := 0
+	for _, seg := range segs {
+		if nextSigIn(toks, seg[0], seg[1]) < 0 {
+			continue
+		}
+		// 每个元素须是 { ... } 对象。
+		objText := exprText(toks, seg[0], seg[1])
+		objToks, ok := keyframeObjTokens(objText, pos, ctx, keyPos)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, objToks...)
+		out = append(out, styleTokOp(",", pos))
+		count++
+	}
+	if count == 0 {
+		ctx.report("style-animation-keyframes", keyPos, "keyframes 数组不能为空")
+		return nil, false
+	}
+	out = append(out, styleTokOp("}", pos))
+	return out, true
+}
+
+// keyframeObjTokens 把单个关键帧 { offset, props } lower 成 gxscene.Keyframe{...}。
+func keyframeObjTokens(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) ([]Token, bool) {
+	t := strings.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
+		ctx.report("style-animation-keyframes", keyPos, "关键帧须写成 { offset, props } 对象")
+		return nil, false
+	}
+	inner := t[1 : len(t)-1]
+	toks := New(inner).AllTokens()
+	if len(toks) > 0 && toks[len(toks)-1].Kind == EOF {
+		toks = toks[:len(toks)-1]
+	}
+	segs := splitTopLevelSegs(toks, 0, len(toks))
+	var offset string
+	var propsToks []Token
+	hasProps := false
+	for _, seg := range segs {
+		if nextSigIn(toks, seg[0], seg[1]) < 0 {
+			continue
+		}
+		colon := transitionTopColon(toks, seg[0], seg[1])
+		ki, vi := nextSigIn(toks, seg[0], colon), nextSigIn(toks, colon+1, seg[1])
+		if colon < 0 || ki < 0 || vi < 0 {
+			ctx.report("style-animation-keyframes", keyPos, "关键帧配置项须写成 key: value")
+			return nil, false
+		}
+		key := toks[ki].Text
+		if u, err := strconv.Unquote(key); err == nil {
+			key = u
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		valText := exprText(toks, vi, seg[1])
+		switch key {
+		case "offset":
+			v := strings.TrimSpace(valText)
+			if u, err := strconv.Unquote(v); err == nil {
+				v = u
+			}
+			if isNumericLiteral(v) {
+				offset = v
+			} else {
+				ctx.report("style-animation-keyframes", keyPos, "offset 须为 0..1 数字或 \"0%\" 形式字符串")
+				return nil, false
+			}
+		case "props":
+			if !isObjectLitText(valText) {
+				ctx.report("style-animation-keyframes", keyPos, "props 须是样式对象")
+				return nil, false
+			}
+			sub, ok := styleObjToTokens(valText, pos, ctx)
+			if !ok {
+				return nil, false
+			}
+			propsToks = sub
+			hasProps = true
+		default:
+			ctx.report("style-animation-keyframes", keyPos, "关键帧未知字段 "+key+"（仅 offset/props）")
+			return nil, false
+		}
+	}
+	if offset == "" {
+		ctx.report("style-animation-keyframes", keyPos, "关键帧缺少 offset")
+		return nil, false
+	}
+	out := []Token{styleTokIdent("gxscene", pos), styleTokOp(".", pos), styleTokIdent("Keyframe", pos), styleTokOp("{", pos),
+		styleTokIdent("Offset", pos), styleTokOp(":", pos), styleTokString(strconv.Quote(offset), pos), styleTokOp(",", pos)}
+	if hasProps {
+		out = append(out, styleTokIdent("Props", pos), styleTokOp(":", pos))
+		out = append(out, propsToks...)
+		out = append(out, styleTokOp(",", pos))
+	}
+	out = append(out, styleTokOp("}", pos))
+	return out, true
 }
 
 // unquoteIdent 取标识符/字符串字面量的纯文本。

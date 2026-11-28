@@ -1,6 +1,8 @@
 package gxscene
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -37,6 +39,72 @@ const (
 	// PropAnimation 是动画 prop 在后端的协议键。
 	PropAnimation = "animation"
 )
+
+// ---------- 内嵌关键帧（静态结构，编译期强类型） ----------
+//
+// animation 是静态 struct，关键帧内聚其中：开发者写
+// animation: { duration: 1000, iterations: -1, keyframes: [...] }，
+// 编译器生成静态 gxscene.AnimationStyle 结构，字段拼错在编译期报错。
+// Props() 展平时编码成现有字符串协议：
+//   - name/duration/iterations → "animation" 简写串（兼容内置 blink 链路）
+//   - keyframes → "animation-keyframes" 紧凑 JSON 串（新增协议键）
+// 与伪状态子表 "&:hover" 的编码方式同构——后端协议仍是字符串，ABI 零改动。
+
+// Keyframe 是一个关键帧：Offset 为 0..1 的进度，Props 是该帧的样式覆盖。
+// Props 复用 Style 结构，故 keyframes 里的属性同样受固定字段集约束。
+type Keyframe struct {
+	Offset StyleValue `gx:"offset"`
+	Props  Style      `gx:"props"`
+}
+
+// AnimationStyle 是 animation 的静态结构（含内嵌关键帧，非 map）。
+// Name 留空且 Keyframes 非空时表示自定义关键帧动画；Name="blink" 走内置。
+type AnimationStyle struct {
+	Name       StyleValue `gx:"name"`
+	Duration   StyleValue `gx:"duration"`
+	Iterations StyleValue `gx:"iterations"`
+	Keyframes  []Keyframe `gx:"keyframes"`
+}
+
+// PropAnimationKeyframes 是内嵌关键帧在后端 props 里的协议键。
+const PropAnimationKeyframes = "animation-keyframes"
+
+// animationString 把 animation 结构编码成简写串 "<name> <duration> <iterations>"。
+// 等价于旧的字符串写法，后端 ParseAnimation 无需改动。
+func (a *AnimationStyle) animationString() string {
+	parts := make([]string, 0, 3)
+	if a.Name != "" {
+		parts = append(parts, string(a.Name))
+	}
+	if a.Duration != "" {
+		parts = append(parts, string(a.Duration))
+	}
+	if a.Iterations != "" {
+		parts = append(parts, string(a.Iterations))
+	}
+	return strings.Join(parts, " ")
+}
+
+// keyframesJSON 把内嵌关键帧编码成紧凑 JSON 串：
+//
+//	[{"offset":"0","props":{"opacity":"0"}},{"offset":"1","props":{"opacity":"1"}}]
+//
+// 无帧返回空串，后端据此忽略。props 为空时用 {} 保证 JSON 合法。
+func (a *AnimationStyle) keyframesJSON() string {
+	if len(a.Keyframes) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, f := range a.Keyframes {
+		props := encodeSubStyle(f.Props)
+		if props == "" {
+			props = "{}"
+		}
+		off, _ := json.Marshal(string(f.Offset))
+		parts = append(parts, `{"offset":`+string(off)+`,"props":`+props+`}`)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
 
 // AnimationSpec 是 animation prop 的解析结果。
 type AnimationSpec struct {
@@ -131,6 +199,109 @@ func parseDurationMS(s string) (int64, bool) {
 		return 0, false
 	}
 	return int64(v * 1000), true
+}
+
+// animationStyleFromAny 把动态输入（map/字符串/结构）转成静态 AnimationStyle，
+// 供 setStyleValue 的动态构造路径使用。未知字段报明确错误。
+func animationStyleFromAny(v any) (AnimationStyle, error) {
+	switch x := v.(type) {
+	case AnimationStyle:
+		return x, nil
+	case *AnimationStyle:
+		if x != nil {
+			return *x, nil
+		}
+		return AnimationStyle{}, nil
+	case string:
+		// 简写串反解成结构：按空白切分，首 Token 是 name，含单位的是 duration，
+		// 其余是 iterations。与 ParseAnimation 的字段顺序约定一致。
+		var a AnimationStyle
+		for _, tok := range strings.Fields(strings.ToLower(strings.TrimSpace(x))) {
+			if tok == "infinite" || (len(tok) > 0 && tok[0] >= '0' && tok[0] <= '9' && !strings.ContainsAny(tok, "sm")) {
+				if a.Iterations == "" {
+					a.Iterations = tok
+				}
+				continue
+			}
+			if _, ok := parseDurationMS(tok); ok {
+				if a.Duration == "" {
+					a.Duration = tok
+				}
+				continue
+			}
+			if a.Name == "" {
+				a.Name = tok
+			}
+		}
+		return a, nil
+	case map[string]any:
+		var a AnimationStyle
+		for k, val := range x {
+			switch strings.ToLower(k) {
+			case "keyframes":
+				kfs, err := keyframesFromAny(val)
+				if err != nil {
+					return AnimationStyle{}, err
+				}
+				a.Keyframes = kfs
+			case "name", "duration", "iterations":
+				sv, ok := scalarToStyleValue(val)
+				if !ok {
+					return AnimationStyle{}, fmt.Errorf("字段 %q 的值不是合法标量", k)
+				}
+				switch strings.ToLower(k) {
+				case "name":
+					a.Name = sv
+				case "duration":
+					a.Duration = sv
+				case "iterations":
+					a.Iterations = sv
+				}
+			default:
+				return AnimationStyle{}, fmt.Errorf("未知字段 %q（仅 name/duration/iterations/keyframes）", k)
+			}
+		}
+		return a, nil
+	default:
+		return AnimationStyle{}, fmt.Errorf("值类型 %T 不是 animation 结构", v)
+	}
+}
+
+// keyframesFromAny 把 []any / []Keyframe 转成静态 []Keyframe。
+func keyframesFromAny(v any) ([]Keyframe, error) {
+	switch x := v.(type) {
+	case []Keyframe:
+		return x, nil
+	case []any:
+		out := make([]Keyframe, 0, len(x))
+		for i, item := range x {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("第 %d 帧不是对象", i)
+			}
+			var kf Keyframe
+			for k, val := range m {
+				switch strings.ToLower(k) {
+				case "offset":
+					kf.Offset, _ = scalarToStyleValue(val)
+				case "props":
+					st, err := styleFromAny(val)
+					if err != nil {
+						return nil, fmt.Errorf("第 %d 帧 props: %w", i, err)
+					}
+					kf.Props = st
+				default:
+					return nil, fmt.Errorf("第 %d 帧未知字段 %q（仅 offset/props）", i, k)
+				}
+			}
+			out = append(out, kf)
+		}
+		return out, nil
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("keyframes 值类型 %T 不是数组", v)
+	}
 }
 
 // AnimationFromProps 从后端 props 读取 animation 标量并解析。

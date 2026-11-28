@@ -40,8 +40,8 @@ func TestAnimationBlinkSample(t *testing.T) {
 	spec := ParseAnimation("blink 1000ms infinite")
 	// 半周期方波：相位 <500ms → 1，>=500ms → 0。
 	cases := []struct {
-		nowMS int64
-		op    float32
+		nowMS  int64
+		op     float32
 		active bool
 	}{
 		{0, 1, true},
@@ -78,5 +78,133 @@ func TestAnimationFromProps(t *testing.T) {
 	}
 	if _, ok := AnimationFromProps(map[string]any{}); ok {
 		t.Error("空 props 不应有动画")
+	}
+}
+
+// ---------- 内嵌关键帧静态结构 ----------
+
+func TestAnimationKeyframesEncode(t *testing.T) {
+	a := &AnimationStyle{
+		Duration: "1000ms", Iterations: "-1",
+		Keyframes: []Keyframe{
+			{Offset: "0", Props: Style{Opacity: "0", Transform: "translateX(-100%)"}},
+			{Offset: "1", Props: Style{Opacity: "1"}},
+		},
+	}
+	want := `[{"offset":"0","props":{"opacity":"0","transform":"translateX(-100%)"}},{"offset":"1","props":{"opacity":"1"}}]`
+	if got := a.keyframesJSON(); got != want {
+		t.Errorf("keyframesJSON 不符:\ngot  %s\nwant %s", got, want)
+	}
+	if str := a.animationString(); str != "1000ms -1" {
+		t.Errorf("animationString = %q, want %q", str, "1000ms -1")
+	}
+}
+
+func TestAnimationKeyframesEncodeEmptyProps(t *testing.T) {
+	// 空 props 必须用 {} 保证 JSON 合法。
+	a := &AnimationStyle{Keyframes: []Keyframe{{Offset: "0.5"}}}
+	if got := a.keyframesJSON(); got != `[{"offset":"0.5","props":{}}]` {
+		t.Errorf("空 props 编码 = %s", got)
+	}
+}
+
+func TestAnimationNoKeyframes(t *testing.T) {
+	// 无关键帧时 keyframesJSON 为空，animationString 仍输出简写。
+	a := &AnimationStyle{Name: "blink", Duration: "1.06s", Iterations: "infinite"}
+	if a.keyframesJSON() != "" {
+		t.Errorf("无帧应返回空串")
+	}
+	if str := a.animationString(); str != "blink 1.06s infinite" {
+		t.Errorf("animationString = %q", str)
+	}
+}
+
+func TestStylePropsEmitsAnimationKeyframes(t *testing.T) {
+	// Props() 展平必须产出 animation 简写串 + animation-keyframes JSON。
+	s := Style{
+		Bg: "#fff",
+		Animation: &AnimationStyle{
+			Duration: "1000ms", Iterations: "-1",
+			Keyframes: []Keyframe{
+				{Offset: "0", Props: Style{Opacity: "0"}},
+				{Offset: "1", Props: Style{Opacity: "1"}},
+			},
+		},
+	}
+	p := s.Props()
+	if p["bg"] != "#fff" {
+		t.Errorf("普通属性丢失: bg=%q", p["bg"])
+	}
+	if p["animation"] != "1000ms -1" {
+		t.Errorf("animation 简写串 = %q", p["animation"])
+	}
+	wantKF := `[{"offset":"0","props":{"opacity":"0"}},{"offset":"1","props":{"opacity":"1"}}]`
+	if p[PropAnimationKeyframes] != wantKF {
+		t.Errorf("animation-keyframes = %q, want %q", p[PropAnimationKeyframes], wantKF)
+	}
+}
+
+func TestStylePropsBlinkNoKeyframeKey(t *testing.T) {
+	// 内置 blink 不产生 animation-keyframes 键（零破坏旧链路）。
+	s := Style{Animation: &AnimationStyle{Name: "blink", Duration: "1.06s", Iterations: "infinite"}}
+	p := s.Props()
+	if p["animation"] != "blink 1.06s infinite" {
+		t.Errorf("animation = %q", p["animation"])
+	}
+	if _, ok := p[PropAnimationKeyframes]; ok {
+		t.Errorf("blink 不应产生 animation-keyframes 键")
+	}
+}
+
+func TestAnimationStyleFromAnyMap(t *testing.T) {
+	// 动态构造（JSON/headless）路径：map → 静态 struct。
+	a, err := animationStyleFromAny(map[string]any{
+		"duration": "1000ms", "iterations": "-1",
+		"keyframes": []any{
+			map[string]any{"offset": "0", "props": map[string]any{"opacity": "0"}},
+			map[string]any{"offset": "1", "props": map[string]any{"opacity": "1"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("animationStyleFromAny: %v", err)
+	}
+	if a.Duration != "1000ms" || a.Iterations != "-1" || len(a.Keyframes) != 2 {
+		t.Fatalf("解析结果不符: %+v", a)
+	}
+	if a.Keyframes[0].Props.Opacity != "0" {
+		t.Errorf("首帧 opacity = %q", a.Keyframes[0].Props.Opacity)
+	}
+}
+
+func TestAnimationStyleFromAnyRejectsUnknown(t *testing.T) {
+	if _, err := animationStyleFromAny(map[string]any{"bogus": "x"}); err == nil {
+		t.Error("未知字段应报错")
+	}
+	if _, err := animationStyleFromAny(map[string]any{
+		"keyframes": []any{map[string]any{"offset": "0", "bogus": "x"}},
+	}); err == nil {
+		t.Error("关键帧未知字段应报错")
+	}
+}
+
+func TestStyleFromMapAnimation(t *testing.T) {
+	// StyleFromMap 完整路径：animation 对象 → Props 展平。
+	s, err := StyleFromMap(map[string]any{
+		"animation": map[string]any{
+			"duration": "500ms", "iterations": "3",
+			"keyframes": []any{
+				map[string]any{"offset": "0", "props": map[string]any{"opacity": "0"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StyleFromMap: %v", err)
+	}
+	p := s.Props()
+	if p["animation"] != "500ms 3" {
+		t.Errorf("animation = %q", p["animation"])
+	}
+	if p[PropAnimationKeyframes] == "" {
+		t.Error("animation-keyframes 缺失")
 	}
 }
