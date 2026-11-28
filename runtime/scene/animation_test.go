@@ -208,3 +208,77 @@ func TestStyleFromMapAnimation(t *testing.T) {
 		t.Error("animation-keyframes 缺失")
 	}
 }
+
+// ===== 跨层契约：静态 struct → Props 展平 → 解析，闭环 =====
+
+func TestContractParseAnimationNoNameShorthand(t *testing.T) {
+	// gox-core 自定义关键帧展平出的 animation 串无 name（如 "2000ms 3"）。
+	// ParseAnimation 必须能解析出时长/次数，否则全链路契约在源头就断了。
+	s := ParseAnimation("2000ms 3")
+	if !s.Active() {
+		t.Fatal("无 name 简写串应被识别为活跃动画")
+	}
+	if s.DurationMS != 2000 {
+		t.Errorf("DurationMS = %d, want 2000", s.DurationMS)
+	}
+	if s.Iterations != 3 {
+		t.Errorf("Iterations = %d, want 3", s.Iterations)
+	}
+	s = ParseAnimation("1.5s infinite")
+	if s.DurationMS != 1500 || s.Iterations != -1 {
+		t.Errorf("秒单位/infinite 解析错误: %+v", s)
+	}
+}
+
+func TestContractAnimationStyleRoundTrip(t *testing.T) {
+	// 编译产物形态的 AnimationStyle → Props 展平 → 从 props 解析，闭环一致。
+	style := Style{
+		Bg: "#fff",
+		Animation: &AnimationStyle{
+			Duration: "2000ms", Iterations: "3",
+			Keyframes: []Keyframe{
+				{Offset: "0", Props: Style{Opacity: "0"}},
+				{Offset: "1", Props: Style{Opacity: "1"}},
+			},
+		},
+	}
+	p := style.Props()
+	if p["animation"] != "2000ms 3" {
+		t.Errorf("animation 简写 = %q", p["animation"])
+	}
+	// 用通用 map 通道读回（AnimationFromProps 接受 map[string]any）。
+	m := map[string]any{"animation": p["animation"], PropAnimationKeyframes: p[PropAnimationKeyframes]}
+	spec, ok := AnimationFromProps(m)
+	if !ok {
+		t.Fatal("展平后的 props 应能被 AnimationFromProps 识别")
+	}
+	if spec.DurationMS != 2000 || spec.Iterations != 3 {
+		t.Errorf("回读 spec 不一致: %+v", spec)
+	}
+}
+
+func TestContractKeyframesJSONByteStable(t *testing.T) {
+	// 关键帧 JSON 是跨语言契约（Rust/Web 都按此解析），字节必须稳定：
+	// props 按 Style 固定字段顺序输出，offset 字符串原样。
+	a := &AnimationStyle{
+		Keyframes: []Keyframe{
+			{Offset: "0", Props: Style{Opacity: "0", Transform: "translateX(-100px)"}},
+			{Offset: "1", Props: Style{Opacity: "1"}},
+		},
+	}
+	got := a.keyframesJSON()
+	want := `[{"offset":"0","props":{"opacity":"0","transform":"translateX(-100px)"}},{"offset":"1","props":{"opacity":"1"}}]`
+	if got != want {
+		t.Errorf("关键帧 JSON 字节不稳定:\ngot  %s\nwant %s", got, want)
+	}
+}
+
+func TestContractUnknownNameStillRejected(t *testing.T) {
+	// 匿名串仅接受「时长打头」；任意未知动画名必须 inactive，防止误把
+	// 拼写错误的动画名当成有效动画（回归保护）。
+	for _, s := range []string{"pulse 1s", "fade-in 300ms", "typo 2000ms 3"} {
+		if ParseAnimation(s).Active() {
+			t.Errorf("%q 应为 inactive", s)
+		}
+	}
+}

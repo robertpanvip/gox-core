@@ -36,6 +36,11 @@ const (
 	// 对齐原生 CSS 的 @keyframes gx-blink {0%,49%{opacity:1} 50%,100%{opacity:0}}。
 	AnimationBlink = "blink"
 
+	// AnimationCustom 是内嵌 keyframes 动画的解析期内部占位名。此类动画展平后
+	// 的 animation 串不含协议名（如 "2000ms 3"），后端凭 keyframes 串识别；
+	// 解析期用此名让 AnimationSpec.Active() 成立，Sample() 不按 blink 处理。
+	AnimationCustom = "__custom__"
+
 	// PropAnimation 是动画 prop 在后端的协议键。
 	PropAnimation = "animation"
 )
@@ -155,10 +160,26 @@ func ParseAnimation(s string) AnimationSpec {
 		return AnimationSpec{}
 	}
 	spec := AnimationSpec{Name: fields[0], Iterations: -1}
-	if spec.Name != AnimationBlink {
+	// 内置 blink 需按名字识别；其余 token 按简写逐项解析。自定义关键帧动画
+	// 展平出的串无 name（如 "2000ms 3"），此时 fields[0] 是时长而非名字——
+	// 只要能解析出有效时长就作为匿名动画接受，否则先前的源头解析会把
+	// 自定义动画判为 inactive，导致 duration/iterations 静默丢失。
+	named := spec.Name == AnimationBlink
+	// 匿名自定义串的首 token 必须是时长（"2000ms"/"1.5s"/"0.5"）或 infinite，
+	// 不能是任意标识符（如 "pulse"）——未知动画名必须保持 inactive。
+	anonymous := false
+	if !named {
+		_, isDuration := parseDurationMS(fields[0])
+		anonymous = isDuration || fields[0] == "infinite"
+	}
+	if !named && !anonymous {
 		return AnimationSpec{}
 	}
-	for _, tok := range fields[1:] {
+	toks := fields
+	if named {
+		toks = fields[1:]
+	}
+	for _, tok := range toks {
 		if tok == "infinite" {
 			spec.Iterations = -1
 			continue
@@ -173,6 +194,11 @@ func ParseAnimation(s string) AnimationSpec {
 	}
 	if spec.DurationMS <= 0 {
 		return AnimationSpec{}
+	}
+	if !named {
+		// 匿名自定义动画（内嵌 keyframes）无协议名。用内部占位名让 Active()
+		// 成立；Sample() 因非 blink 不覆盖 opacity，实际帧采样由后端完成。
+		spec.Name = AnimationCustom
 	}
 	return spec
 }
