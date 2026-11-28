@@ -205,3 +205,127 @@ func TestTransitionStringWriteUnchanged(t *testing.T) {
 		t.Errorf("字符串写法被破坏\n%s", res.GoSource)
 	}
 }
+
+// ---------- animation 对象形式 ----------
+
+func TestAnimationObjByteIdenticalToString(t *testing.T) {
+	cases := []struct {
+		name string
+		obj  string
+		str  string
+		want string
+	}{
+		{
+			name: "数字时长无限循环",
+			obj:  `style={{ animation: { name: "blink", duration: 1060, iterations: -1 } }}`,
+			str:  `style={{ animation: "blink 1060ms infinite" }}`,
+			want: `Animation:"blink 1060ms infinite"`,
+		},
+		{
+			name: "字符串时长有限次数",
+			obj:  `style={{ animation: { name: "blink", duration: "1.06s", iterations: 3 } }}`,
+			str:  `style={{ animation: "blink 1.06s 3" }}`,
+			want: `Animation:"blink 1.06s 3"`,
+		},
+		{
+			name: "缺省迭代为infinite",
+			obj:  `style={{ animation: { name: "blink", duration: 500 } }}`,
+			str:  `style={{ animation: "blink 500ms infinite" }}`,
+			want: `Animation:"blink 500ms infinite"`,
+		},
+		{
+			name: "iterations写infinite字符串",
+			obj:  `style={{ animation: { name: "blink", duration: 200, iterations: "infinite" } }}`,
+			str:  `style={{ animation: "blink 200ms infinite" }}`,
+			want: `Animation:"blink 200ms infinite"`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			objRes := compileStyleJSX(t, c.obj)
+			assertNoDiag(t, objRes)
+			strRes := compileStyleJSX(t, c.str)
+			assertNoDiag(t, strRes)
+			if !strings.Contains(objRes.GoSource, c.want) {
+				t.Errorf("对象写法产物缺少 %q\n%s", c.want, objRes.GoSource)
+			}
+			objField := extractAnimationField(objRes.GoSource)
+			strField := extractAnimationField(strRes.GoSource)
+			if objField != strField {
+				t.Errorf("对象与字符串写法产物不一致:\n对象: %q\n字符串: %q", objField, strField)
+			}
+		})
+	}
+}
+
+func extractAnimationField(src string) string {
+	i := strings.Index(src, "Animation:")
+	if i < 0 {
+		return ""
+	}
+	rest := src[i:]
+	if j := strings.Index(rest[10:], `"`); j >= 0 {
+		end := 10 + j
+		if k := strings.Index(rest[end+1:], `"`); k >= 0 {
+			return rest[:end+1+k+1]
+		}
+	}
+	return rest
+}
+
+func TestAnimationObjInvalidDiagnostics(t *testing.T) {
+	cases := []struct {
+		name string
+		expr string
+		code string
+	}{
+		{"未知name", `style={{ animation: { name: "fade", duration: 300 } }}`, "style-animation-field"},
+		{"缺少name", `style={{ animation: { duration: 300 } }}`, "style-animation-field"},
+		{"缺少duration", `style={{ animation: { name: "blink" } }}`, "style-animation-field"},
+		{"duration为零", `style={{ animation: { name: "blink", duration: 0 } }}`, "style-animation-field"},
+		{"迭代为零", `style={{ animation: { name: "blink", duration: 300, iterations: 0 } }}`, "style-animation-field"},
+		{"迭代小数", `style={{ animation: { name: "blink", duration: 300, iterations: 1.5 } }}`, "style-animation-field"},
+		{"未知字段", `style={{ animation: { name: "blink", duration: 300, delay: 100 } }}`, "style-animation-field"},
+		{"非对象", `style={{ animation: 300 }}`, ""}, // 数字标量仍合法（旧写法）
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := compileStyleJSX(t, c.expr)
+			if c.code == "" {
+				// 数字标量走 old path，不报对象相关诊断（可能产出非法 Go 但不应报 style-animation-*）
+				for _, d := range res.Analysis.Diagnostics() {
+					if strings.HasPrefix(d.Code, "style-animation") {
+						t.Errorf("数字标量不应报对象诊断，得到 %v", res.Analysis.Diagnostics())
+					}
+				}
+				return
+			}
+			codes := transitionDiagCodes(res)
+			if !codes[c.code] {
+				t.Errorf("应报 %s，得到 %v\n%s", c.code, codes, res.GoSource)
+			}
+		})
+	}
+}
+
+func TestAnimationObjCoexists(t *testing.T) {
+	res := compileStyleJSX(t, `style={{ bg: "#fff", animation: { name: "blink", duration: 1060, iterations: -1 }, transition: { opacity: { duration: 300 } } }}`)
+	assertNoDiag(t, res)
+	for _, want := range []string{
+		`Bg:"#fff"`,
+		`Animation:"blink 1060ms infinite"`,
+		`Transition:"opacity 300ms ease"`,
+	} {
+		if !strings.Contains(res.GoSource, want) {
+			t.Errorf("产物缺少 %q\n%s", want, res.GoSource)
+		}
+	}
+}
+
+func TestAnimationStringWriteUnchanged(t *testing.T) {
+	res := compileStyleJSX(t, `style={{ animation: "blink 1.06s infinite" }}`)
+	assertNoDiag(t, res)
+	if !strings.Contains(res.GoSource, `Animation:"blink 1.06s infinite"`) {
+		t.Errorf("字符串写法被破坏\n%s", res.GoSource)
+	}
+}

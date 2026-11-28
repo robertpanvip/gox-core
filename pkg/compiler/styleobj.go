@@ -136,14 +136,14 @@ func styleObjToTokens(raw string, pos Pos, ctx *jsxSceneCtx) ([]Token, bool) {
 	segs := splitTopLevelSegs(toks, 0, len(toks))
 
 	type field struct {
-		name  string
-		val   []Token
-		ptr   bool // 伪状态字段用 &gxscene.Style{...}
+		name string
+		val  []Token
+		ptr  bool // 伪状态字段用 &gxscene.Style{...}
 	}
 	var fields []field
 	allOK := true
 	for _, seg := range segs {
-		 // 跳过尾部逗号产生的空段。
+		// 跳过尾部逗号产生的空段。
 		firstSig := -1
 		for k := seg[0]; k < seg[1] && k < len(toks); k++ {
 			if toks[k].Kind == Space || toks[k].Kind == Newline || toks[k].Kind == Comment || toks[k].Kind == EOF {
@@ -227,6 +227,15 @@ func styleObjToTokens(raw string, pos Pos, ctx *jsxSceneCtx) ([]Token, bool) {
 			// "opacity 300ms ease, transform 200ms linear"），与手写字符串
 			// 写法字节一致，后端/协议零改动。只接受已支持的属性与缓动。
 			lowered, ok := transitionObjLower(valText, pos, ctx, toks[keyIdx].Pos)
+			if !ok {
+				allOK = false
+				break
+			}
+			valToks = []Token{styleTokString(strconv.Quote(lowered), pos)}
+		} else if fname == "Animation" && isObjectLitText(valText) {
+			// animation 对象形式：编译期 lower 成受限内置协议字符串（如
+			// "blink 1060ms infinite"），与手写字符串写法字节一致。
+			lowered, ok := animationObjLower(valText, pos, ctx, toks[keyIdx].Pos)
 			if !ok {
 				allOK = false
 				break
@@ -491,6 +500,122 @@ func transitionEasing(val string) (string, bool) {
 	v = strings.ToLower(strings.TrimSpace(v))
 	if transitionEasings[v] {
 		return v, true
+	}
+	return "", false
+}
+
+// ---------- animation 对象形式 → 受限内置协议的编译期 lower ----------
+//
+// GX 写法：
+//
+//	animation: { name: "blink", duration: 1060, iterations: -1 }
+//
+// lower 成与手写字符串写法字节一致的产物：
+//
+//	Animation: "blink 1060ms infinite"
+//
+// 设计边界（与 goxscene.AnimationSpec / 后端 parse_animation 严格对齐）：
+//   - name：当前只支持内置 "blink"，其余报诊断（受限内置动画，非任意 @keyframes）。
+//   - duration：数字按毫秒（1060 → "1060ms"）；带引号字符串原样透传（"1.06s"）。
+//   - iterations：-1 或 "infinite" → "infinite"；正整数 → 该数字。缺省 infinite。
+//   - 未知字段/非法值报诊断并整体放弃。
+
+// animationObjLower 把 animation 对象字面量 lower 成受限协议字符串。
+func animationObjLower(raw string, pos Pos, ctx *jsxSceneCtx, keyPos Pos) (string, bool) {
+	t := strings.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '{' || t[len(t)-1] != '}' {
+		ctx.report("style-animation-object", keyPos, "animation 对象形式须写成 { name, duration, iterations }")
+		return "", false
+	}
+	inner := t[1 : len(t)-1]
+	toks := New(inner).AllTokens()
+	if len(toks) > 0 && toks[len(toks)-1].Kind == EOF {
+		toks = toks[:len(toks)-1]
+	}
+	segs := splitTopLevelSegs(toks, 0, len(toks))
+	var name, dur, iter string
+	for _, seg := range segs {
+		if nextSigIn(toks, seg[0], seg[1]) < 0 {
+			continue
+		}
+		colon := transitionTopColon(toks, seg[0], seg[1])
+		ki, vi := nextSigIn(toks, seg[0], colon), nextSigIn(toks, colon+1, seg[1])
+		if colon < 0 || ki < 0 || vi < 0 {
+			ctx.report("style-animation-field", keyPos, "animation 配置项须写成 key: value")
+			return "", false
+		}
+		key := toks[ki].Text
+		if u, err := strconv.Unquote(key); err == nil {
+			key = u
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val := exprText(toks, vi, seg[1])
+		switch key {
+		case "name":
+			v, ok := unquoteIdent(val)
+			if !ok || v != "blink" {
+				ctx.report("style-animation-field", keyPos, "animation 当前仅支持内置 name \"blink\"")
+				return "", false
+			}
+			name = v
+		case "duration":
+			d, ok := transitionDuration(val)
+			if !ok {
+				ctx.report("style-animation-field", keyPos, "animation 的 duration 须为正时长（如 1060 或 \"1.06s\"）")
+				return "", false
+			}
+			dur = d
+		case "iterations":
+			i, ok := animationIterations(val)
+			if !ok {
+				ctx.report("style-animation-field", keyPos, "animation 的 iterations 须为 -1（infinite）或正整数")
+				return "", false
+			}
+			iter = i
+		default:
+			ctx.report("style-animation-field", keyPos, "animation 未知字段 "+key+"（仅支持 name/duration/iterations）")
+			return "", false
+		}
+	}
+	if name == "" {
+		ctx.report("style-animation-field", keyPos, "animation 缺少 name")
+		return "", false
+	}
+	if dur == "" {
+		ctx.report("style-animation-field", keyPos, "animation 缺少 duration")
+		return "", false
+	}
+	if iter == "" {
+		iter = "infinite"
+	}
+	return name + " " + dur + " " + iter, true
+}
+
+// unquoteIdent 取标识符/字符串字面量的纯文本。
+func unquoteIdent(val string) (string, bool) {
+	v := strings.TrimSpace(val)
+	if u, err := strconv.Unquote(v); err == nil {
+		v = u
+	}
+	v = strings.TrimSpace(v)
+	return v, v != ""
+}
+
+// animationIterations 把迭代次数转成协议文本：-1/infinite → "infinite"，正整数 → 数字。
+func animationIterations(val string) (string, bool) {
+	v := strings.TrimSpace(val)
+	if u, err := strconv.Unquote(v); err == nil {
+		v = u
+	}
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "infinite" || v == "-1" {
+		return "infinite", true
+	}
+	if isNumericLiteral(v) {
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil && f > 0 && f == float64(int64(f)) {
+			return strconv.FormatInt(int64(f), 10), true
+		}
 	}
 	return "", false
 }
