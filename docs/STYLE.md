@@ -57,7 +57,7 @@ box-shadow: "offsetX offsetY blur spread color"
 ```
 
 - spread/color 可省略；颜色支持 `#rgb`/`#rrggbb`/`#rrggbbaa`/`rgb()`/`rgba()`/命名色。
-- 两端采用**同一算法**：6 层半透明圆角矩形，从 `spread+blur` 扩张到 0，alpha 沿高斯近似衰减，得到柔和阴影。跨平台视觉一致（go-skia 0.1 未暴露 DrawLooper，wgpu 后端也无原生 shadow，故统一用近似）。
+- 三端采用**同一算法**：24 层半透明圆角矩形，从 `spread+blur` 扩张到 0，alpha 沿高斯近似衰减，得到柔和阴影。层数需足够多（≥~20）才不会出现同心台阶；跨平台视觉一致（go-skia 0.1 未暴露 DrawLooper，wgpu 后端也无原生 shadow，故统一用近似）。
 - 阴影绘制在元素背景之前，并受祖先 overflow 裁剪。
 
 ## 5. 颜色 alpha 约定

@@ -64,11 +64,13 @@ inst := widgets.Button(gxscene.Props{ /* ... */ })
 
 ### 阴影：三端像素对齐
 
-Apple HIG 的阴影是**极低不透明度的多层柔和叠加**（大 blur、近零 offset），深色背景上需约 2× alpha 才可见。三端共用同一套 token 与同一套 **6 层矩形近似高斯算法**，因此同一 token 在三端视觉一致：
+Apple HIG 的阴影是**极低不透明度的多层柔和叠加**（大 blur、近零 offset），深色背景上需约 2× alpha 才可见。三端共用同一套 token 与同一套 **24 层矩形近似高斯算法**，因此同一 token 在三端视觉一致：
 
-- **Skia（桌面）** `backend/skia/paint.go:paintShadow`：for i=6..1，`expand = spread + blur·(i/6)`，`a = baseA·(1−i/6)/6·1.8`，画圆角矩形。
-- **Rust（原生）** `backend/rust/rust/src/render.rs:paint_shadow_tiny`：逐行同算法。
-- **Web（浏览器）** `backend/web/stylemap.go:expandBoxShadow`：不再用浏览器原生高斯，而是把单层 token 展开成 6 层 CSS `box-shadow`（`ox oy 0px expand rgba(...,a/255)`），逐层复刻上面两端公式，输出顺序 i=1..6 对应 CSS 首个阴影在最上层。
+- **Skia（桌面）** `backend/skia/paint.go:paintShadow`：for i=24..1，`expand = spread + blur·(i/24)`，`a = baseA·(1−i/24)/24·1.8`，画圆角矩形。
+- **Rust（原生）** `backend/rust/rust/src/render.rs:build_gpu_frame`：逐行同算法。
+- **Web（浏览器）** `backend/web/stylemap.go:expandBoxShadow`：不再用浏览器原生高斯，而是把单层 token 展开成 24 层 CSS `box-shadow`（`ox oy 0px expand rgba(...,a/255)`），逐层复刻上面两端公式，输出顺序 i=1..24 对应 CSS 首个阴影在最上层。
+
+> 层数需足够多才柔和：早期 6 层时层间距 `blur/6`（如 blur=56 约 9px），每层硬边叠加形成肉眼可见的同心"靶环"台阶；24 层把间距降到 ~2.3px，剖面平滑递减且贴近高斯参照。`a` 系数 1.8 保持不变，总阴影深度与旧 6 层基本一致。
 
 token 灰度按叠加大致 `中心 alpha ≈ token alpha × 0.71` 校准，故取值略高于目标视觉值。测试 `TestExpandBoxShadowMatchesSkia` 逐层比对 expand 与 alpha，保证三端公式不漂移。
 

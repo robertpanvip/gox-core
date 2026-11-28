@@ -126,8 +126,8 @@ const (
 
 // ---- 柔和多层阴影（Apple HIG：低 alpha、大 blur、近零 offset）----
 // Apple 阴影是「极低不透明度的多层柔和叠加」，深色背景上需约 2× 才可见。
-// 后端用 6 层矩形近似模拟高斯，叠加后中心 alpha ≈ token alpha × 0.71，
-// 故 token 取值略高于目标视觉值。三端共用同一套 token + 同一套 6 层算法。
+// 后端用 24 层矩形近似模拟高斯，叠加后中心 alpha ≈ token alpha × 0.71，
+// 故 token 取值略高于目标视觉值。三端共用同一套 token + 同一套 24 层算法。
 // 用 var 而不是 const：SetTheme 会按明暗主题同步成对应强度（浅色更轻）。
 var (
 	ShadowCard  = "0 2px 8px 0 #00000033"
