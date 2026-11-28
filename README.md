@@ -13,13 +13,13 @@
 **安装 gox**（Linux / macOS 一键脚本，会校验 SHA256）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robertpanvip/gox-core/main/scripts/install.sh | bash
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/robertpanvip/gox-core/main/scripts/install.ps1 | iex
 ```
 
 或用 Go 原生方式安装：

@@ -1,16 +1,16 @@
 # gox 一键安装脚本（Windows PowerShell）
 #
 # 用法：
-#   irm https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/robertpanvip/gox-core/main/scripts/install.ps1 | iex
 #   $env:GOX_VERSION="v0.1.0"; $env:GOX_INSTALL_DIR="$HOME\bin"; .\install.ps1
 #
 # 环境变量：
 #   GOX_VERSION      指定版本（如 v0.1.0），默认取最新 Release
 #   GOX_INSTALL_DIR  安装目录，默认 $HOME\.local\bin
-#   GOX_REPO         GitHub 仓库（默认 RobertPanVIP/gox-core）
+#   GOX_REPO         GitHub 仓库（默认 robertpanvip/gox-core）
 
 $ErrorActionPreference = 'Stop'
-$Repo = if ($env:GOX_REPO) { $env:GOX_REPO } else { 'RobertPanVIP/gox-core' }
+$Repo = if ($env:GOX_REPO) { $env:GOX_REPO } else { 'robertpanvip/gox-core' }
 $ApiBase = "https://api.github.com/repos/$Repo"
 $ReleaseBase = "https://github.com/$Repo/releases"
 $InstallDir = if ($env:GOX_INSTALL_DIR) { $env:GOX_INSTALL_DIR } else { Join-Path $HOME '.local\bin' }

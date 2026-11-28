@@ -2,16 +2,16 @@
 # gox 一键安装脚本（Linux / macOS）
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/RobertPanVIP/gox-core/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/robertpanvip/gox-core/main/scripts/install.sh | bash
 #   GOX_VERSION=v0.1.0 GOX_INSTALL_DIR=/usr/local/bin bash install.sh
 #
 # 环境变量：
 #   GOX_VERSION      指定版本（如 v0.1.0），默认取最新 Release
 #   GOX_INSTALL_DIR  安装目录，默认 $HOME/.local/bin
-#   GOX_REPO         GitHub 仓库（默认 RobertPanVIP/gox-core，便于 fork/离线镜像）
+#   GOX_REPO         GitHub 仓库（默认 robertpanvip/gox-core，便于 fork/离线镜像）
 set -euo pipefail
 
-REPO="${GOX_REPO:-RobertPanVIP/gox-core}"
+REPO="${GOX_REPO:-robertpanvip/gox-core}"
 API_BASE="https://api.github.com/repos/${REPO}"
 RELEASE_BASE="https://github.com/${REPO}/releases"
 INSTALL_DIR="${GOX_INSTALL_DIR:-$HOME/.local/bin}"
