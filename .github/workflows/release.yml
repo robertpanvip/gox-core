@@ -1,8 +1,4 @@
 name: Release
-# 注意：本文件暂存于 workflows-test/（推送凭证缺 workflow scope，放在
-# .github/workflows/ 下 GitHub 不会识别/触发）。
-# 启用方式：把目录改名为 .github/workflows/ 即可，其余内容不用动。
-#
 # 打 v* tag 时交叉编译 gox 并发布预编译二进制。
 # 产物命名与 scripts/install.sh / install.ps1 严格对应：
 #   gox_<tag>_<os>_<arch>.tar.gz（Windows 为 .zip）+ checksums.txt

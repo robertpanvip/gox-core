@@ -2,7 +2,7 @@
 
 > 状态：已定稿，按此实施。最后更新：2026-11-28
 >
-> 配套实现：`cmd/gox`（`init` / `run` / `mod`）、`scripts/install.sh`、`.github/workflows-test/release.yml`
+> 配套实现：`cmd/gox`（`init` / `run` / `mod`）、`scripts/install.sh`、`.github/workflows/release.yml`
 
 ## 1. 结论先行
 
@@ -137,9 +137,8 @@
 
 ## 9. Release 工作流
 
-`.github/workflows-test/release.yml`：
+`.github/workflows/release.yml`：
 
-> 当前暂存于 `workflows-test/`（推送凭证缺 workflow scope）。启用时把目录改名为 `workflows/` 即可，内容不用改。
 
 - 触发：`push tags: ['v*']`。
 - 矩阵交叉编译 5 个目标（`GOOS`/`GOARCH`），`CGO_ENABLED=0`（gox 本体是纯 Go）。
@@ -164,7 +163,7 @@
 |---|---|---|
 | 1 | `gox init` / `gox run` 命令 + 测试 | `go test ./cmd/gox/...` 全绿；现有用例零改动 |
 | 2 | `scripts/install.sh` / `install.ps1` | 在干净环境能下载、校验、安装；失败场景有明确报错 |
-| 3 | `.github/workflows-test/release.yml` | 打 `v*` tag 后产出 5 个平台包 + checksums |
+| 3 | `.github/workflows/release.yml` | 打 `v*` tag 后产出 5 个平台包 + checksums |
 | 4 | README 更新 | 快速开始：`安装 → gox init → gox run` 三步跑通 |
 
 ## 12. FAQ
